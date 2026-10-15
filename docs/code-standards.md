@@ -41,7 +41,7 @@ npm run check && npm run format:check && npm test
 PR 正文和 commit 正文要包含跑了什么和没跑什么，例如：
 
 ```
-Ran: npm run check, npm run format:check, npm test (79 pass)
+Ran: npm run check, npm run format:check, npm test (113 tests, 1 skipped without POCKET_SOURCE)
 Not run: 真机微信收发、长期空闲主动推送、媒体上传
 ```
 
@@ -51,7 +51,7 @@ Not run: 真机微信收发、长期空闲主动推送、媒体上传
 
 命令清单和能力边界在四个地方描述，必须与 `src/bridge.ts` 的 `switch` 一致：
 
-- `README.md` 的「会话切换」表和「首版不支持」段落
+- `README.md` 的「会话切换」表和「仍不支持」段落
 - `docs/hermes-parity.md` 的「暂未提供」
 - `SECURITY.md` 的 Boundaries
 - `src/bridge.ts` 里的 `HELP`
@@ -67,3 +67,6 @@ Not run: 真机微信收发、长期空闲主动推送、媒体上传
   的改动，人审是硬性要求。
 - 数据库 schema 变更必须递增 `PRAGMA user_version` 并保留旧版本迁移路径；
   更高版本的数据一律拒绝打开。
+- 扩大安全边界的改动另写一份 `docs/<主题>-review.md`（形式照 `docs/runtime-media-review.md`）：
+  必须由人接受的边界变化、跑了什么、Not run 什么，等用户明确确认后才提交。
+  测试通过不等于人工接受了边界扩大。
