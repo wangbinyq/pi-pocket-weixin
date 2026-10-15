@@ -1,0 +1,12 @@
+node_modules/
+.env
+.env.*
+!.env.example
+*.sqlite*
+*.db*
+credentials.json
+.credentials-*
+*.log
+coverage/
+.data/
+*.lock/
