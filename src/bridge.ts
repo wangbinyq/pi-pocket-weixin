@@ -40,6 +40,10 @@ const HELP = `Pi Pocket 微信桥接
 仅同步当前会话的新最终回复；切换取消旧会话待发回复，不停止旧任务，也不补发离开期间的回复。
 审批和提供商登录请打开 Pocket；仅支持本人私聊。`;
 
+// The platform drops the typing state after a few seconds, so a busy session re-sends on this
+// heartbeat; collect() syncs replies on the same tick, which keeps refresh and expiry in step.
+const TYPING_HEARTBEAT_MS = 2000;
+
 export class Bridge {
   readonly store: Store;
   readonly pocket: PocketPort;
@@ -548,7 +552,11 @@ export class Bridge {
     }
   }
   async #typing(active: boolean): Promise<void> {
-    if (active === this.#typingActive && (!active || Date.now() - this.#typingAt < 8000)) return;
+    if (
+      active === this.#typingActive &&
+      (!active || Date.now() - this.#typingAt < TYPING_HEARTBEAT_MS)
+    )
+      return;
     this.#typingActive = active;
     this.#typingAt = Date.now();
     try {
@@ -594,7 +602,7 @@ export class Bridge {
       await Promise.all([
         loop(() => this.receive(signal), 250, "Weixin polling"),
         loop(() => this.processNext(signal), 250, "Pocket input"),
-        loop(() => this.collect(), 3000, "Pocket replies"),
+        loop(() => this.collect(), TYPING_HEARTBEAT_MS, "Pocket replies"),
         loop(() => this.deliverNext(signal), 1500, "Weixin output"),
       ]);
     } finally {

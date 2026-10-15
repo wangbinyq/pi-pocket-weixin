@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { Bridge } from "../src/bridge.ts";
 import { Pocket } from "../src/pocket.ts";
-import { HttpError } from "../src/http.ts";
+import { HttpError, type Fetcher } from "../src/http.ts";
 import { ILink } from "../src/ilink.ts";
 import { Store } from "../src/store.ts";
 import { account, fixture } from "./helpers.ts";
@@ -209,6 +209,67 @@ test("typing begins, stops for approvals, refreshes and never blocks task submis
   await f.bridge.processNext();
   assert.equal(f.store.job(), undefined);
   assert.equal(f.pocket.requests.size, 2);
+});
+
+test("typing heartbeats while the session stays busy, so the indicator never expires", async (t) => {
+  const f = fixture(t);
+  await f.bridge.initialize();
+  t.mock.timers.enable({ apis: ["Date"], now: Date.now() });
+  f.input("task");
+  await f.bridge.processNext();
+  assert.deepEqual(f.weixin.typingStates, [true]);
+  f.pocket.active = [{ id: 1, title: "PiP", busy: true, approvals: 0 }];
+  await f.bridge.collect();
+  assert.deepEqual(f.weixin.typingStates, [true], "one heartbeat is not re-sent twice");
+  t.mock.timers.tick(2000);
+  await f.bridge.collect();
+  await f.bridge.collect();
+  assert.deepEqual(
+    f.weixin.typingStates,
+    [true, true],
+    "the platform state is refreshed on the next heartbeat",
+  );
+  f.pocket.active = [];
+  await f.bridge.collect();
+  assert.deepEqual(f.weixin.typingStates, [true, true, false]);
+});
+
+test("typing ticket is prefetched at intake and reused instead of fetched while busy", async () => {
+  const calls: string[] = [];
+  const fetcher: Fetcher = async (url) => {
+    const endpoint = String(url).split("/").pop();
+    calls.push(endpoint || "");
+    return Response.json(
+      endpoint === "getupdates"
+        ? { ret: 0, msgs: [{ message_id: "1" }], get_updates_buf: "next" }
+        : { ret: 0, typing_ticket: "prefetched" },
+    );
+  };
+  const ilink = new ILink(account, fetcher, () => {});
+  await ilink.updates("");
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(calls, ["getupdates", "getconfig"], "intake warms the ticket before any typing");
+  await ilink.typing(account.peer, true);
+  assert.deepEqual(calls, ["getupdates", "getconfig", "sendtyping"], "typing reuses it");
+});
+
+test("a missing typing ticket is logged, never sent, and retried on the next attempt", async () => {
+  const calls: string[] = [];
+  const logs: string[] = [];
+  const ilink = new ILink(
+    account,
+    async (url) => {
+      calls.push(String(url).split("/").pop() || "");
+      return Response.json({ ret: 0 });
+    },
+    (message) => logs.push(message),
+  );
+  await ilink.typing(account.peer, true, "context");
+  assert.deepEqual(calls, ["getconfig"], "nothing is sent without a ticket");
+  assert.ok(logs.some((line) => line.includes("typing ticket unavailable")));
+  assert.ok(logs.every((line) => !line.includes("context") && !line.includes(account.token)));
+  await ilink.typing(account.peer, false, "context");
+  assert.deepEqual(calls, ["getconfig", "getconfig"], "the next attempt retries instead of no-op");
 });
 
 test("typing wire fields match Hermes and ticket is reused without exposing credentials", async () => {
