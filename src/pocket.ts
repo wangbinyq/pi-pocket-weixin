@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { type Fetcher, pocketBase, requestJson } from "./http.ts";
 import { oneLine } from "./format.ts";
+import { AttachmentSchema, MediaError, type Attachment } from "./media.ts";
 
 export const TargetSchema = z.object({
   id: z.number().int().positive(),
@@ -32,6 +33,16 @@ const RunningSchema = z.object({
   approvals: z.number().int().nonnegative(),
 });
 export type Running = z.infer<typeof RunningSchema>;
+export const ModelSchema = z.object({
+  provider: z.string(),
+  id: z.string(),
+  name: z.string(),
+  levels: z.array(z.string()),
+  images: z.boolean(),
+  signIn: z.boolean().optional(),
+});
+export type PocketModel = z.infer<typeof ModelSchema>;
+export type BusyMode = "queue" | "steer" | "interrupt";
 export interface PocketPort {
   principal(): Promise<string>;
   sessions(): Promise<PocketSession[]>;
@@ -39,7 +50,18 @@ export interface PocketPort {
   head(id: number): Promise<number>;
   after(id: number, cursor: number): Promise<Entry[]>;
   create(title: string, cwd?: string): Promise<Target>;
-  submit(id: number, text: string, requestId: string): Promise<void>;
+  submit(
+    id: number,
+    text: string,
+    requestId: string,
+    mode?: "steer" | "followUp",
+    attachments?: Attachment[],
+  ): Promise<void>;
+  upload(id: number, data: Buffer, name: string, mime: string): Promise<Attachment>;
+  cwd(target: Target): Promise<string>;
+  stop(id: number): Promise<void>;
+  models(): Promise<PocketModel[]>;
+  model(id: number, provider: string, modelId: string, thinkingLevel?: string): Promise<void>;
   reset(id: number, note?: string): Promise<void>;
   running(): Promise<Running[]>;
   link(id: number): string;
@@ -128,9 +150,72 @@ export class Pocket implements PocketPort {
     );
     return { id: result.id, title: oneLine(title) || "Weixin", pip: false };
   }
-  async submit(id: number, text: string, requestId: string): Promise<void> {
+  async submit(
+    id: number,
+    text: string,
+    requestId: string,
+    mode: "steer" | "followUp" = "followUp",
+    attachments?: Attachment[],
+  ): Promise<void> {
     z.object({ submissionId: z.number(), requestId: z.string() }).parse(
-      await this.#request(`c/${id}/submit`, { text, requestId, mode: "followUp" }),
+      await this.#request(`c/${id}/submit`, {
+        text,
+        requestId,
+        mode,
+        ...(attachments?.length ? { attachments } : {}),
+      }),
+    );
+  }
+  async upload(id: number, data: Buffer, name: string, mime: string): Promise<Attachment> {
+    return AttachmentSchema.parse(
+      await requestJson(
+        this.fetcher,
+        `${this.base}/api/c/${id}/upload?name=${encodeURIComponent(name)}`,
+        {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${this.token}`,
+            "X-Pocket": "1",
+            "Content-Type": mime,
+            "Content-Length": String(data.length),
+          },
+          body: new Uint8Array(data),
+        },
+        60_000,
+        this.signal,
+      ),
+    );
+  }
+  async cwd(target: Target): Promise<string> {
+    if (target.pip)
+      throw new MediaError("PiP 不导出本地文件，请先 /resume <项目会话 ID> 后再 /send。");
+    const session = (await this.sessions()).find((item) => item.id === target.id);
+    if (!session) throw new MediaError("找不到可访问的会话目录。");
+    return session.cwd;
+  }
+  async stop(id: number): Promise<void> {
+    z.object({ ok: z.literal(true) }).parse(await this.#request(`c/${id}/abort`, {}));
+    const deadline = Date.now() + 30_000;
+    while ((await this.running()).some((entry) => entry.id === id && entry.busy)) {
+      if (Date.now() >= deadline) throw new Error("Stop not yet confirmed");
+      await new Promise<void>((resolve) => setTimeout(resolve, 250));
+      this.signal?.throwIfAborted();
+    }
+  }
+  async models(): Promise<PocketModel[]> {
+    return z.object({ models: z.array(ModelSchema) }).parse(await this.#request("me")).models;
+  }
+  async model(
+    id: number,
+    provider: string,
+    modelId: string,
+    thinkingLevel?: string,
+  ): Promise<void> {
+    z.object({ ok: z.literal(true) }).parse(
+      await this.#request(`c/${id}/configure`, {
+        model: { provider, modelId },
+        ...(thinkingLevel ? { thinkingLevel } : {}),
+      }),
     );
   }
   async reset(id: number, note?: string): Promise<void> {

@@ -42,7 +42,7 @@ test("v1 schema migrates without resetting durable inbox, route, cursor or reply
   f.store.enqueue("reply", "durable reply", 1);
   const key = f.store.delivery()!.key;
   f.store.db.exec(
-    "ALTER TABLE inbox DROP COLUMN received; ALTER TABLE inbox DROP COLUMN sealed; PRAGMA user_version=1;",
+    "ALTER TABLE inbox DROP COLUMN received; ALTER TABLE inbox DROP COLUMN sealed; ALTER TABLE inbox DROP COLUMN media; ALTER TABLE inbox DROP COLUMN attachments; ALTER TABLE outbox DROP COLUMN media; ALTER TABLE outbox DROP COLUMN wire; PRAGMA user_version=1;",
   );
   const migrated = new Store(f.dir);
   try {

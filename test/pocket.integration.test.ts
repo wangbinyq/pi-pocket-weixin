@@ -12,7 +12,7 @@ import { account, fixture } from "./helpers.ts";
 const source = process.env.POCKET_SOURCE;
 
 test(
-  "real Pocket API: PiP, switching, idempotent input, final replies, /reset and /new",
+  "real Pocket API: routing, idempotency, reset, stop, models, busy modes, media and new sessions",
   { skip: !source, timeout: 90_000 },
   async (t) => {
     const reservation = createServer();
@@ -101,6 +101,53 @@ test(
     }
     assert.ok(
       f.weixin.sent.some((entry) => /echo:[\s\S]*integration idempotent task/.test(entry.text)),
+    );
+    const models = await pocket.models();
+    const vision = models.find((model) => model.images && !model.signIn)!;
+    assert.ok(vision);
+    f.input(`/model ${vision.provider}/${vision.id} off`);
+    await bridge.processNext();
+    assert.equal(f.store.get("modelIntent"), "");
+    const image = Buffer.from(
+      "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==",
+      "base64",
+    );
+    const imageBaseline = await pocket.head(first.id);
+    f.weixin.downloadData = image;
+    f.store.ingest(account, "image-cursor", [
+      {
+        messageId: "image-integration",
+        peer: account.peer,
+        text: "inspect this image",
+        unsupported: false,
+        media: [{ kind: "image", name: "image.png", query: "fixture" }],
+      },
+    ]);
+    await bridge.processNext();
+    const imageEntries = await waitForReply(first.id, imageBaseline);
+    const imageEntry = imageEntries.find((entry) => entry.kind === "user");
+    assert.ok(imageEntry);
+    const storedImage = await fetch(`${login.origin}/api/c/${first.id}/image/${imageEntry.id}/0`, {
+      headers: { Authorization: `Bearer ${token}`, "X-Pocket": "1" },
+      redirect: "error",
+    });
+    assert.equal(storedImage.status, 200);
+    assert.deepEqual(Buffer.from(await storedImage.arrayBuffer()), image);
+    f.input("/busy steer");
+    await bridge.processNext();
+    assert.equal(f.store.get("busyMode"), "steer");
+    const steerBaseline = await pocket.head(first.id);
+    f.input("steered integration task");
+    await bridge.processNext();
+    await waitForReply(first.id, steerBaseline);
+    f.input("/busy queue");
+    await bridge.processNext();
+    f.input("/stop");
+    await bridge.processNext();
+    assert.equal(f.store.get("stopIntent"), "");
+    assert.equal(
+      (await pocket.running()).some((entry) => entry.id === first.id && entry.busy),
+      false,
     );
     const resetBaseline = await pocket.head(first.id);
     const sessionCount = (await pocket.sessions()).length;

@@ -7,11 +7,14 @@ import { privateDirectory } from "./config.ts";
 import { splitText, stableId } from "./format.ts";
 import type { Incoming } from "./ilink.ts";
 import { type Target, TargetSchema } from "./pocket.ts";
+import { BlobSchema, type MediaBlob, type Attachment } from "./media.ts";
 
 const JobSchema = z.object({
   key: z.string(),
   text: z.string(),
   unsupported: z.number(),
+  media: z.string().nullable(),
+  attachments: z.string().nullable(),
   target: z.string().nullable(),
   creating: z.number(),
   attempts: z.number(),
@@ -30,6 +33,8 @@ const DeliverySchema = z.object({
   key: z.string(),
   text: z.string(),
   conversation: z.number().nullable(),
+  media: z.string().nullable(),
+  wire: z.string().nullable(),
   attempts: z.number(),
   due: z.number(),
   state: z.string(),
@@ -46,7 +51,7 @@ export class Store {
     const version = z
       .object({ user_version: z.number() })
       .parse(this.db.prepare("PRAGMA user_version").get()).user_version;
-    if (![0, 1, 2].includes(version)) {
+    if (![0, 1, 2, 3].includes(version)) {
       this.db.close();
       throw new Error("Unsupported bridge database version");
     }
@@ -78,6 +83,12 @@ export class Store {
           "ALTER TABLE inbox ADD COLUMN received INTEGER NOT NULL DEFAULT 0;" +
             "ALTER TABLE inbox ADD COLUMN sealed INTEGER NOT NULL DEFAULT 0;" +
             "PRAGMA user_version=2;",
+        );
+      });
+    if (version < 3)
+      this.transaction(() => {
+        this.db.exec(
+          "ALTER TABLE inbox ADD COLUMN media TEXT; ALTER TABLE inbox ADD COLUMN attachments TEXT; ALTER TABLE outbox ADD COLUMN media TEXT; ALTER TABLE outbox ADD COLUMN wire TEXT; PRAGMA user_version=3;",
         );
       });
   }
@@ -124,8 +135,16 @@ export class Store {
         if (msg.peer !== account.peer) throw new Error("Cannot store an unpaired sender");
         const key = stableId(account.accountId, msg.peer, msg.messageId);
         const inserted = this.db
-          .prepare("INSERT OR IGNORE INTO inbox(key,text,unsupported,received) VALUES(?,?,?,?)")
-          .run(key, msg.text, Number(msg.unsupported), Date.now());
+          .prepare(
+            "INSERT OR IGNORE INTO inbox(key,text,unsupported,received,media) VALUES(?,?,?,?,?)",
+          )
+          .run(
+            key,
+            msg.text,
+            Number(msg.unsupported),
+            Date.now(),
+            msg.media?.length ? JSON.stringify(msg.media) : null,
+          );
         if (Number(inserted.changes) > 0 && msg.contextToken)
           this.set("contextToken", msg.contextToken);
       }
@@ -152,7 +171,7 @@ export class Store {
       .run(id ?? null, id ?? null);
     this.db
       .prepare(
-        "UPDATE outbox SET state='cancelled',text='' WHERE conversation IS NOT NULL AND state!='sent' AND NOT EXISTS (SELECT 1 FROM watches WHERE watches.id=outbox.conversation AND active=1)",
+        "UPDATE outbox SET state='cancelled',text='',media=NULL,wire=NULL WHERE conversation IS NOT NULL AND state!='sent' AND NOT EXISTS (SELECT 1 FROM watches WHERE watches.id=outbox.conversation AND active=1)",
       )
       .run();
   }
@@ -171,8 +190,16 @@ export class Store {
     return row ? JobSchema.parse(row) : undefined;
   }
   prepareJob(delay: number): Job | undefined {
-    const row = this.db.prepare("SELECT * FROM inbox WHERE done=0 ORDER BY seq LIMIT 1").get();
+    let row = this.db.prepare("SELECT * FROM inbox WHERE done=0 ORDER BY seq LIMIT 1").get();
     if (!row) return undefined;
+    if (typeof row.text === "string" && !row.text.startsWith("/")) {
+      const command = this.db
+        .prepare(
+          "SELECT * FROM inbox WHERE done=0 AND unsupported=0 AND text LIKE '/%' ORDER BY seq LIMIT 1",
+        )
+        .get();
+      if (command?.text === "/stop") row = command;
+    }
     const first = JobSchema.extend({ sealed: z.number(), received: z.number() }).parse(row);
     if (
       !delay ||
@@ -180,6 +207,7 @@ export class Store {
       first.sealed ||
       first.target ||
       first.unsupported ||
+      first.media ||
       first.text.startsWith("/") ||
       first.creating
     )
@@ -197,6 +225,7 @@ export class Store {
         next.sealed ||
         next.target ||
         next.unsupported ||
+        next.media ||
         next.creating ||
         next.text.startsWith("/") ||
         next.received - previous.received > quiet(previous.text) ||
@@ -223,6 +252,22 @@ export class Store {
       .prepare("UPDATE inbox SET target=? WHERE key=? AND target IS NULL")
       .run(JSON.stringify(target), key);
   }
+  saveAttachments(key: string, attachments: Attachment[]): void {
+    this.db
+      .prepare("UPDATE inbox SET attachments=? WHERE key=? AND done=0")
+      .run(JSON.stringify(attachments), key);
+  }
+  beginStop(key: string, target: Target): void {
+    this.transaction(() => {
+      this.pinJob(key, target);
+      this.set("stopIntent", key);
+      this.db
+        .prepare(
+          "UPDATE inbox SET done=1,text='',media=NULL,attachments=NULL WHERE done=0 AND seq<(SELECT seq FROM inbox WHERE key=?) AND text NOT LIKE '/%' AND (target IS NULL OR json_extract(target,'$.id')=?)",
+        )
+        .run(key, target.id);
+    });
+  }
   beginReset(key: string, target: Target): void {
     this.transaction(() => {
       this.pinJob(key, target);
@@ -232,12 +277,29 @@ export class Store {
   markCreating(key: string): void {
     this.db.prepare("UPDATE inbox SET creating=1 WHERE key=?").run(key);
   }
-  finish(key: string, response?: string, created?: Target): void {
+  finish(
+    key: string,
+    response?: string,
+    created?: Target,
+    media?: { blob: MediaBlob; conversation: number }[],
+  ): void {
     this.transaction(() => {
       if (created) this.#select(created, 0);
       if (response) this.enqueue(`command:${key}`, response);
-      this.db.prepare("UPDATE inbox SET done=1,text='' WHERE key=?").run(key);
-      if (this.get("resetIntent") === key) this.set("resetIntent", "");
+      media?.forEach((item, index) =>
+        this.enqueueMedia(`command:${key}:media:${index}`, item.blob, item.conversation),
+      );
+      this.db
+        .prepare("UPDATE inbox SET done=1,text='',media=NULL,attachments=NULL WHERE key=?")
+        .run(key);
+      for (const intent of [
+        "resetIntent",
+        "stopIntent",
+        "interruptIntent",
+        "interruptStopped",
+        "modelIntent",
+      ])
+        if (this.get(intent) === key) this.set(intent, "");
     });
   }
   retryJob(job: Job): void {
@@ -264,7 +326,7 @@ export class Store {
       this.db.prepare("UPDATE watches SET active=0,approval=0 WHERE id=?").run(id);
       this.db
         .prepare(
-          "UPDATE outbox SET state='cancelled',text='' WHERE conversation=? AND state!='sent'",
+          "UPDATE outbox SET state='cancelled',text='',media=NULL,wire=NULL WHERE conversation=? AND state!='sent'",
         )
         .run(id);
     });
@@ -283,6 +345,26 @@ export class Store {
         .run(stableId(key, String(index)), chunk, conversation ?? null);
     });
   }
+  enqueueMedia(key: string, blob: MediaBlob, conversation: number): void {
+    this.db
+      .prepare("INSERT OR IGNORE INTO outbox(key,text,conversation,media) VALUES(?,'',?,?)")
+      .run(stableId(key, "0"), conversation, JSON.stringify(BlobSchema.parse(blob)));
+  }
+  saveWire(key: string, wire: string): void {
+    this.db.prepare("UPDATE outbox SET wire=? WHERE key=? AND state='pending'").run(wire, key);
+  }
+  mediaInUse(): Set<string> {
+    const rows = z
+      .array(z.object({ media: z.string() }))
+      .parse(
+        this.db
+          .prepare(
+            "SELECT media FROM outbox WHERE media IS NOT NULL AND state IN ('pending','blocked','failed')",
+          )
+          .all(),
+      );
+    return new Set(rows.map((row) => BlobSchema.parse(JSON.parse(row.media)).id));
+  }
   delivery(): Delivery | undefined {
     const row = this.db
       .prepare(
@@ -295,7 +377,9 @@ export class Store {
     return !!this.db.prepare("SELECT 1 FROM outbox WHERE key=? AND state='pending'").get(key);
   }
   sent(key: string): void {
-    this.db.prepare("UPDATE outbox SET state='sent',text='' WHERE key=?").run(key);
+    this.db
+      .prepare("UPDATE outbox SET state='sent',text='',media=NULL,wire=NULL WHERE key=?")
+      .run(key);
   }
   deliveryFailed(row: Delivery, blocked: boolean, delay = 0): void {
     this.db

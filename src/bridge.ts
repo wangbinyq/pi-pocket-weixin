@@ -1,3 +1,4 @@
+import { z } from "zod";
 import { setTimeout as sleep } from "node:timers/promises";
 import type { Account, Config } from "./config.ts";
 import { oneLine } from "./format.ts";
@@ -5,6 +6,18 @@ import { HttpError } from "./http.ts";
 import { ILinkError, incomingFor, type WeixinPort } from "./ilink.ts";
 import { finalText, type PocketPort, type Target, TargetSchema } from "./pocket.ts";
 import { type Job, Store } from "./store.ts";
+import {
+  AttachmentSchema,
+  BlobSchema,
+  MediaCache,
+  MediaError,
+  MediaRefSchema,
+  imageMime,
+  fileMime,
+  readExport,
+  safeName,
+} from "./media.ts";
+import { MediaItemSchema } from "./weixin-media.ts";
 
 const HELP = `Pi Pocket 微信桥接
 /pip — 连接 PiP 管家
@@ -12,13 +25,17 @@ const HELP = `Pi Pocket 微信桥接
 /resume <ID> — 恢复指定会话
 /new [标题] — 新建并连接会话
 /reset [交接说明] — 当前会话开启新上下文，保留历史
+/stop — 停止当前运行并撤回排队输入
+/model [provider/id] [思考级别] — 列出或切换模型
+/busy [queue|steer|interrupt] — 忙时输入策略
+/send <项目内路径> — 显式发送当前项目的图片或文件
 /status — 当前目标和待发送消息
 /retry-send — 重试暂停的微信发送（不重新运行模型）
 /help — 帮助
 
-普通文字发送到当前目标，忙时排队。
+文字、图片和文件发送到当前目标，默认忙时排队。语音和视频不处理。
 仅同步当前会话的新最终回复；切换取消旧会话待发回复，不停止旧任务，也不补发离开期间的回复。
-审批、模型选择和文件操作请打开 Pocket；首版仅支持本人私聊和文字。`;
+审批和提供商登录请打开 Pocket；仅支持本人私聊。`;
 
 export class Bridge {
   readonly store: Store;
@@ -27,7 +44,10 @@ export class Bridge {
   readonly account: Account;
   readonly config: Config;
   readonly log: (message: string) => void;
+  readonly media: MediaCache;
   #userId = "";
+  #typingAt = 0;
+  #typingActive = false;
   constructor(
     store: Store,
     pocket: PocketPort,
@@ -36,6 +56,7 @@ export class Bridge {
     config: Config,
     log: (message: string) => void = console.log,
   ) {
+    this.media = new MediaCache(config.dataDir);
     this.store = store;
     this.pocket = pocket;
     this.weixin = weixin;
@@ -47,6 +68,7 @@ export class Bridge {
     this.#userId = await this.pocket.principal();
     this.store.bind(this.account, this.config.pocketUrl, this.#userId);
     this.store.reconcile();
+    await this.media.prune(this.store.mediaInUse());
     if (!this.store.target()) await this.#select(await this.pocket.pip());
   }
   async #authorize(): Promise<void> {
@@ -57,6 +79,7 @@ export class Bridge {
     return `【#${target.id} ${oneLine(target.title)}】`;
   }
   async #select(target: Target): Promise<void> {
+    await this.#typing(false);
     const head = await this.pocket.head(target.id);
     this.store.select(target, head);
   }
@@ -73,12 +96,21 @@ export class Bridge {
       );
     }
   }
-  async processNext(): Promise<boolean> {
+  async processNext(signal?: AbortSignal): Promise<boolean> {
     const job = this.store.prepareJob(this.config.textBatchDelayMs ?? 300);
     if (!job || job.due > Date.now()) return false;
     try {
       await this.#authorize();
-      if (this.store.get("resetIntent") === job.key) {
+      if (
+        ["stopIntent", "interruptIntent", "modelIntent"].some(
+          (intent) => this.store.get(intent) === job.key,
+        )
+      ) {
+        this.store.finish(
+          job.key,
+          "上次控制请求的结果不确定，未自动重复执行或重新发送任务。请 /status 或打开 Pocket 检查，再明确发送新请求。",
+        );
+      } else if (this.store.get("resetIntent") === job.key) {
         this.store.finish(
           job.key,
           "上次 /reset 的结果不确定，未自动重试，避免再次清除新上下文。请打开 Pocket 检查当前会话的新上下文标记后，再决定是否重新发送 /reset。",
@@ -91,9 +123,13 @@ export class Bridge {
       } else if (job.unsupported) {
         this.store.finish(
           job.key,
-          "首版只支持不超过 32000 字符的纯文字，附件和语音请在 Pocket 发送。本条消息没有交给 Pi。",
+          "仅支持不超过 32000 字符的文字、图片和文件（每条最多 8 个附件、每个 20 MiB）。语音、视频、格式不完整或不支持的引用不会提交；本条消息没有交给 Pi。",
         );
       } else if (job.text.startsWith("/")) {
+        if (job.media)
+          throw new CommandError(
+            "带附件的斜杠命令不会执行，请单独发送命令，或用普通文字描述附件任务。",
+          );
         await this.#command(job);
       } else {
         const target = job.target
@@ -106,16 +142,56 @@ export class Bridge {
           !this.store.watches().some((watch) => watch.id === target.id)
         )
           await this.#select(target);
-        await this.pocket.submit(target.id, job.text, job.key);
+        const refs = job.media ? z.array(MediaRefSchema).max(8).parse(JSON.parse(job.media)) : [];
+        const attachments = job.attachments
+          ? z.array(AttachmentSchema).parse(JSON.parse(job.attachments))
+          : [];
+        for (const ref of refs.slice(attachments.length)) {
+          const bytes = await this.weixin.download(ref, signal);
+          const mime = ref.kind === "image" ? imageMime(bytes) : fileMime(ref.name);
+          if (!mime) throw new MediaError("图片格式不可识别，本条消息未提交。");
+          attachments.push(await this.pocket.upload(target.id, bytes, safeName(ref.name), mime));
+          this.store.saveAttachments(job.key, attachments);
+        }
+        const mode = this.store.get("busyMode") || "queue";
+        if (
+          mode === "interrupt" &&
+          this.store.get("interruptStopped") !== job.key &&
+          (await this.pocket.running()).some((entry) => entry.id === target.id && entry.busy)
+        ) {
+          this.store.set("interruptIntent", job.key);
+          await this.pocket.stop(target.id);
+          this.store.transaction(() => {
+            this.store.set("interruptIntent", "");
+            this.store.set("interruptStopped", job.key);
+          });
+        }
+        await this.pocket.submit(
+          target.id,
+          job.text,
+          job.key,
+          mode === "steer" ? "steer" : "followUp",
+          attachments,
+        );
+        await this.#typing(true);
         this.store.finish(job.key);
       }
     } catch (error) {
-      if (error instanceof CommandError) {
+      if (error instanceof CommandError || error instanceof MediaError) {
         this.store.finish(job.key, error.message);
       } else if (error instanceof HttpError && [400, 403, 404, 409].includes(error.status)) {
         this.store.finish(
           job.key,
           `Pocket 暂未接受请求（HTTP ${error.status}）。请打开网页检查会话权限、模型、费用限制或轮流控制状态，再重新发送。`,
+        );
+      } else if (
+        ["stopIntent", "interruptIntent", "modelIntent"].some(
+          (intent) => this.store.get(intent) === job.key,
+        )
+      ) {
+        this.store.finish(
+          job.key,
+          "本次控制请求的结果不确定，未自动重复执行，也未继续提交中断后的任务。请打开 Pocket 检查后明确发送新请求。",
         );
       } else {
         this.store.retryJob(job);
@@ -205,6 +281,94 @@ export class Bridge {
         response = `${this.#label(target)} 新上下文请求已接受。\n历史记录保留，会话 ID 不变；${note ? "已附带交接说明。" : "未附带交接说明。"}忙时在下一处理边界生效，不停止当前任务。\n${this.pocket.link(target.id)}`;
         break;
       }
+      case "/stop": {
+        if (argument) throw new CommandError("用法：/stop，停止当前选中的会话。");
+        const target = this.store.target();
+        if (!target) throw new CommandError("没有目标会话，请先 /pip 或 /resume <ID>。");
+        this.store.beginStop(job.key, target);
+        await this.pocket.stop(target.id);
+        await this.#typing(false);
+        response = `${this.#label(target)} 当前运行已停止，之前排队的输入已撤回。独立后台任务和定时计划不会全部取消。\n${this.pocket.link(target.id)}`;
+        break;
+      }
+      case "/busy": {
+        if (argument && !["queue", "steer", "interrupt"].includes(argument))
+          throw new CommandError("用法：/busy [queue|steer|interrupt]。");
+        if (argument) this.store.set("busyMode", argument);
+        const mode = this.store.get("busyMode") || "queue";
+        response = `忙时策略：${mode}。${mode === "steer" ? "当前工具轮次结束后插入指令。" : mode === "interrupt" ? "先停止再提交，不是原子操作；停止结果不确定时不会自动发送任务。" : "当前运行结束后排队处理。"}`;
+        break;
+      }
+      case "/model": {
+        const models = await this.pocket.models();
+        if (!argument) {
+          response =
+            "已配置的模型（不会自动选择）：\n" +
+            models
+              .map(
+                (model) =>
+                  `${oneLine(model.provider)}/${oneLine(model.id)} · ${oneLine(model.name)}${model.signIn ? " · 需网页登录" : ""} · 思考：${model.levels.join(",")}`,
+              )
+              .join("\n") +
+            "\n/model <provider/id> [思考级别] 切换当前会话。";
+          break;
+        }
+        const [spec, level, ...extra] = words;
+        const model = models.find((item) => `${item.provider}/${item.id}` === spec);
+        if (!model || model.signIn || extra.length || (level && !model.levels.includes(level)))
+          throw new CommandError("模型或思考级别不可用。请 /model 查看；提供商登录请在网页完成。");
+        const target = this.store.target();
+        if (!target) throw new CommandError("没有目标会话，请先 /pip 或 /resume <ID>。");
+        this.store.transaction(() => {
+          this.store.pinJob(job.key, target);
+          this.store.set("modelIntent", job.key);
+        });
+        await this.pocket.model(target.id, model.provider, model.id, level);
+        response = `${this.#label(target)} 已选择 ${oneLine(spec!)}${level ? " · " + level : ""}；不会中断正在执行的工具。\n${this.pocket.link(target.id)}`;
+        break;
+      }
+      case "/send": {
+        const requested = job.text.trim().slice(command.length).trim();
+        if (!requested)
+          throw new CommandError("用法：/send <当前项目内路径>，不自动读取模型回复里的路径。");
+        const host = new URL(this.config.pocketUrl).hostname;
+        if (
+          process.platform !== "linux" ||
+          !["localhost", "127.0.0.1", "127.0.0.2", "[::1]"].includes(host)
+        )
+          throw new CommandError(
+            "/send 只支持与 Pocket 共用本机文件系统的 Linux loopback 部署，远程 Pocket 请在网页下载文件。",
+          );
+        const target = job.target
+          ? TargetSchema.parse(JSON.parse(job.target))
+          : this.store.target();
+        if (!target) throw new CommandError("没有目标会话，请先 /resume <ID>。");
+        this.store.pinJob(job.key, target);
+        await this.pocket.head(target.id);
+        let exported;
+        try {
+          exported = await readExport(
+            await this.pocket.cwd(target),
+            requested,
+            this.config.dataDir,
+          );
+        } catch (error) {
+          if (error instanceof MediaError) throw error;
+          throw new CommandError("文件不可读取，请检查项目内路径；未发送任何文件。");
+        }
+        const blob = await this.media.put(
+          exported.data,
+          exported.name,
+          imageMime(exported.data) ? "image" : "file",
+        );
+        this.store.finish(
+          job.key,
+          `${this.#label(target)} 已排队发送 ${blob.name}（${blob.size} 字节）。`,
+          undefined,
+          [{ blob, conversation: target.id }],
+        );
+        return;
+      }
       case "/status": {
         const target = this.store.target();
         const running = (await this.pocket.running()).find((entry) => entry.id === target?.id);
@@ -229,6 +393,11 @@ export class Bridge {
   async collect(): Promise<void> {
     await this.#authorize();
     const running = await this.pocket.running();
+    await this.#typing(
+      running.some(
+        (entry) => entry.id === this.store.target()?.id && entry.busy && !entry.approvals,
+      ),
+    );
     const generation = this.store.generation();
     for (const watch of this.store.watches()) {
       let entries;
@@ -292,20 +461,31 @@ export class Bridge {
     if (!eligible()) return false;
     const context = this.store.get("contextToken");
     try {
+      let wire = row.wire ? MediaItemSchema.parse(JSON.parse(row.wire)) : undefined;
+      if (row.media && !wire) {
+        const blob = BlobSchema.parse(JSON.parse(row.media));
+        wire = await this.weixin.upload(
+          this.account.peer,
+          blob,
+          await this.media.read(blob),
+          signal,
+        );
+        if (!eligible()) return false;
+        this.store.saveWire(row.key, JSON.stringify(wire));
+      }
+      const send = (token?: string) =>
+        wire
+          ? this.weixin.sendMedia(this.account.peer, wire, row.key, token, signal)
+          : this.weixin.send(this.account.peer, row.text, row.key, token, signal);
+      if (!eligible()) return false;
       try {
-        await this.weixin.send(this.account.peer, row.text, row.key, context || undefined, signal);
+        await send(context || undefined);
       } catch (error) {
         if (!(error instanceof ILinkError && ["session", "auth"].includes(error.kind) && context))
           throw error;
         if (this.store.get("contextToken") === context) this.store.set("contextToken", "");
         if (!eligible()) return false;
-        await this.weixin.send(
-          this.account.peer,
-          row.text,
-          row.key,
-          this.store.get("contextToken") || undefined,
-          signal,
-        );
+        await send(this.store.get("contextToken") || undefined);
       }
       this.store.sent(row.key);
       return true;
@@ -323,6 +503,20 @@ export class Bridge {
           : "Weixin delivery deferred; check doctor or use /retry-send if paused.",
       );
       return false;
+    }
+  }
+  async #typing(active: boolean): Promise<void> {
+    if (active === this.#typingActive && (!active || Date.now() - this.#typingAt < 8000)) return;
+    this.#typingActive = active;
+    this.#typingAt = Date.now();
+    try {
+      await this.weixin.typing(
+        this.account.peer,
+        active,
+        this.store.get("contextToken") || undefined,
+      );
+    } catch {
+      this.log("Weixin typing indicator unavailable; message handling continues.");
     }
   }
   async run(signal: AbortSignal): Promise<void> {
@@ -354,12 +548,16 @@ export class Bridge {
         }
       }
     };
-    await Promise.all([
-      loop(() => this.receive(signal), 250, "Weixin polling"),
-      loop(() => this.processNext(), 250, "Pocket input"),
-      loop(() => this.collect(), 3000, "Pocket replies"),
-      loop(() => this.deliverNext(signal), 1500, "Weixin output"),
-    ]);
+    try {
+      await Promise.all([
+        loop(() => this.receive(signal), 250, "Weixin polling"),
+        loop(() => this.processNext(signal), 250, "Pocket input"),
+        loop(() => this.collect(), 3000, "Pocket replies"),
+        loop(() => this.deliverNext(signal), 1500, "Weixin output"),
+      ]);
+    } finally {
+      await this.#typing(false);
+    }
   }
 }
 class CommandError extends Error {}

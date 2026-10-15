@@ -6,8 +6,17 @@ import type { Account, Config } from "../src/config.ts";
 import { Bridge } from "../src/bridge.ts";
 import { HttpError } from "../src/http.ts";
 import type { Updates, WeixinPort } from "../src/ilink.ts";
-import type { Entry, PocketPort, PocketSession, Running, Target } from "../src/pocket.ts";
+import type {
+  Entry,
+  PocketPort,
+  PocketSession,
+  Running,
+  Target,
+  PocketModel,
+} from "../src/pocket.ts";
 import { Store } from "../src/store.ts";
+import type { Attachment, MediaBlob, MediaRef } from "../src/media.ts";
+import type { MediaItem } from "../src/weixin-media.ts";
 
 export const account: Account = {
   accountId: "test-bot",
@@ -23,6 +32,15 @@ export class FakePocket implements PocketPort {
   ]);
   requests = new Map<string, { id: number; text: string }>();
   resets: { id: number; note?: string }[] = [];
+  stops: number[] = [];
+  modelChanges: { id: number; provider: string; modelId: string; thinkingLevel?: string }[] = [];
+  availableModels: PocketModel[] = [
+    { provider: "test", id: "model", name: "Test", levels: ["off", "high"], images: true },
+  ];
+  modes: string[] = [];
+  uploads: { id: number; data: Buffer; attachment: Attachment }[] = [];
+  submittedAttachments: Attachment[][] = [];
+  directory = "/tmp";
   calls: string[] = [];
   active: Running[] = [];
   failSubmit = false;
@@ -55,10 +73,46 @@ export class FakePocket implements PocketPort {
     if (this.failCreate) throw new Error("Response lost after server commit");
     return { id, title, pip: false };
   }
-  async submit(id: number, text: string, requestId: string): Promise<void> {
+  async submit(
+    id: number,
+    text: string,
+    requestId: string,
+    mode = "followUp",
+    attachments: Attachment[] = [],
+  ): Promise<void> {
+    this.submittedAttachments.push(attachments);
+    this.modes.push(mode);
     this.calls.push(requestId);
     this.requests.set(requestId, { id, text });
     if (this.failSubmit) throw new Error("Response lost after server commit");
+  }
+  async cwd(): Promise<string> {
+    return this.directory;
+  }
+  async upload(id: number, data: Buffer, name: string, mime: string): Promise<Attachment> {
+    const attachment = {
+      path: `/uploads/${id}/${this.uploads.length}-${name}`,
+      name,
+      mime,
+      size: data.length,
+    };
+    this.uploads.push({ id, data, attachment });
+    return attachment;
+  }
+  async stop(id: number): Promise<void> {
+    this.stops.push(id);
+    this.active = this.active.filter((entry) => entry.id !== id);
+  }
+  async models(): Promise<PocketModel[]> {
+    return this.availableModels;
+  }
+  async model(
+    id: number,
+    provider: string,
+    modelId: string,
+    thinkingLevel?: string,
+  ): Promise<void> {
+    this.modelChanges.push({ id, provider, modelId, ...(thinkingLevel ? { thinkingLevel } : {}) });
   }
   async reset(id: number, note?: string): Promise<void> {
     this.resets.push({ id, ...(note === undefined ? {} : { note }) });
@@ -72,6 +126,33 @@ export class FakePocket implements PocketPort {
 }
 export class FakeWeixin implements WeixinPort {
   batch: Updates = { cursor: "next", messages: [] };
+  typingStates: boolean[] = [];
+  downloads: MediaRef[] = [];
+  downloadData = Buffer.from("file contents");
+  uploaded: MediaBlob[] = [];
+  mediaSent: { item: MediaItem; clientId: string; token?: string }[] = [];
+  async download(ref: MediaRef): Promise<Buffer> {
+    this.downloads.push(ref);
+    return this.downloadData;
+  }
+  async upload(_peer: string, blob: MediaBlob): Promise<MediaItem> {
+    this.uploaded.push(blob);
+    const media = {
+      encrypt_query_param: "upload-param",
+      aes_key: Buffer.alloc(16).toString("base64"),
+      encrypt_type: 1 as const,
+    };
+    return blob.kind === "image"
+      ? { type: 2, image_item: { media, mid_size: 16 } }
+      : { type: 4, file_item: { media, file_name: blob.name, len: String(blob.size) } };
+  }
+  async sendMedia(_peer: string, item: MediaItem, clientId: string, token?: string): Promise<void> {
+    if (this.fail) throw this.fail;
+    this.mediaSent.push({ item, clientId, token });
+  }
+  async typing(_peer: string, active: boolean): Promise<void> {
+    this.typingStates.push(active);
+  }
   sent: { peer: string; text: string; clientId: string; token?: string }[] = [];
   fail?: Error;
   async updates(): Promise<Updates> {

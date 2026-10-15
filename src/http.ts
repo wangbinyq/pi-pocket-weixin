@@ -1,5 +1,7 @@
 export type Fetcher = typeof fetch;
 
+export class ResponseSizeError extends Error {}
+
 export class HttpError extends Error {
   readonly status: number;
   constructor(service: string, status: number) {
@@ -16,6 +18,21 @@ export async function requestJson(
   signal?: AbortSignal,
   parse: (text: string) => unknown = JSON.parse,
 ): Promise<unknown> {
+  const response = await requestBytes(fetcher, url, init, timeout, 8 * 1024 * 1024, signal);
+  try {
+    return parse(response.bytes.toString("utf8"));
+  } catch {
+    throw new Error(`Invalid JSON from ${new URL(url).hostname}`);
+  }
+}
+export async function requestBytes(
+  fetcher: Fetcher,
+  url: string,
+  init: RequestInit,
+  timeout: number,
+  limit: number,
+  signal?: AbortSignal,
+): Promise<{ bytes: Buffer; headers: Headers }> {
   const deadline = AbortSignal.timeout(timeout);
   const response = await fetcher(url, {
     ...init,
@@ -35,17 +52,13 @@ export async function requestJson(
       const { done, value } = await reader.read();
       if (done) break;
       size += value.length;
-      if (size > 8 * 1024 * 1024) throw new Error("HTTP response exceeds 8 MiB");
+      if (size > limit) throw new ResponseSizeError("HTTP response exceeds size limit");
       chunks.push(value);
     }
   } finally {
     await reader.cancel();
   }
-  try {
-    return parse(Buffer.concat(chunks).toString("utf8"));
-  } catch {
-    throw new Error(`Invalid JSON from ${new URL(url).hostname}`);
-  }
+  return { bytes: Buffer.concat(chunks), headers: response.headers };
 }
 
 export function pocketBase(value: string): string {

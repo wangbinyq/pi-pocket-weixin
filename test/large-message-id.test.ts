@@ -40,6 +40,10 @@ test("large-ID wire messages reach the durable inbox once each, not zero or one 
     f.store,
     f.pocket,
     {
+      typing: (peer, active) => f.weixin.typing(peer, active),
+      download: (ref) => f.weixin.download(ref),
+      upload: (peer, blob) => f.weixin.upload(peer, blob),
+      sendMedia: (peer, item, id, token) => f.weixin.sendMedia(peer, item, id, token),
       updates: (cursor, signal) => api.updates(cursor, signal),
       send: (peer, text, clientId, context) => f.weixin.send(peer, text, clientId, context),
     },
