@@ -297,11 +297,14 @@ export class Store {
   ): void {
     this.transaction(() => {
       if (created) this.#select(created, 0);
-      if (response) this.enqueue(`command:${key}`, response);
-      if (response && diagnostic) this.set("diagnosticReply", stableId(`command:${key}`, "0"));
+      // A media row leads its own text: it can only be sent after a CDN upload (up to 120s), so
+      // text enqueued first is delivered alone and the pair reads as a mismatch. Media first also
+      // makes the text its immediate successor, which a queue bypass (/status) cannot separate.
       media?.forEach((item, index) =>
         this.enqueueMedia(`command:${key}:media:${index}`, item.blob, item.conversation),
       );
+      if (response) this.enqueue(`command:${key}`, response);
+      if (response && diagnostic) this.set("diagnosticReply", stableId(`command:${key}`, "0"));
       this.db
         .prepare("UPDATE inbox SET done=1,text='',media=NULL,attachments=NULL WHERE key=?")
         .run(key);

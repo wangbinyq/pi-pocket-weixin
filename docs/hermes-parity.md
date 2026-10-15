@@ -34,6 +34,7 @@
 | 忙时输入     | 支持 queue、steer、interrupt，默认 interrupt                              | 支持三种策略但默认 queue；steer 使用 Pocket 原生 API，interrupt 非原子 stop + submit，停止不确定时拒绝自动继续 |
 | 去重         | message_id 短期去重，也有相同正文指纹过滤                                 | 持久化精确消息 ID，不按正文丢弃合法重复的“继续”；64 位数字 ID 按原始 JSON 数字文本保留                         |
 | 分片         | adapter 上限 2000 字符，Markdown 感知，部分聊天短行可拆泡；默认 1.5s 间隔 | 保守 1800 Unicode 码点，按段落/代码块分片，超长代码块闭合重开，固定至少 1.5s；不会为了兼容而截掉正文           |
+| 媒体与说明   | `_send_file` 先上传，再依次发 caption 文本、媒体（caption 在前）          | 媒体行排在自己的确认文字之前：上传仍在投递时进行，但图/文件与说明因此相邻，不被队列越队或上传耗时拉开          |
 | 权限         | 可配置私聊/群聊策略，gateway 有额外授权                                   | 只接受 QR 返回的本人私聊，Pocket 凭证必须为 owner，不开放额外入口                                              |
 | 数据可靠性   | Hermes 自己的存储和生命周期                                               | SQLite durable inbox/outbox、固定 Pocket requestId；外部微信发送仍不能保证 exactly-once                        |
 

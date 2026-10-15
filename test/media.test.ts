@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
+import { mkdtempSync, rmSync } from "node:fs";
 import { mkdir, stat, symlink, truncate, utimes, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { Bridge } from "../src/bridge.ts";
@@ -298,9 +300,8 @@ test("/send snapshots only an explicit local project file and reuses encrypted u
   while (await f.bridge.deliverNext()) {}
   f.input("/send report.txt");
   await f.bridge.processNext();
-  assert.match(f.store.delivery()?.text || "", /已排队发送/);
-  await f.bridge.deliverNext();
   const key = f.store.delivery()!.key;
+  assert.ok(f.store.delivery()!.media, "the media row leads its own confirmation text");
   await writeFile(join(f.pocket.directory, "report.txt"), "changed");
   f.weixin.fail = new Error("send response lost");
   await f.bridge.deliverNext();
@@ -317,10 +318,41 @@ test("/send snapshots only an explicit local project file and reuses encrypted u
     assert.ok(await bridge.deliverNext());
     assert.equal(f.weixin.uploaded.length, 1);
     assert.equal(f.weixin.mediaSent[0]?.clientId, key);
+    assert.ok(await bridge.deliverNext(), "the confirmation text follows its image");
+    assert.match(f.weixin.sent.at(-1)!.text, /已排队发送/);
     assert.equal(reopened.delivery(), undefined);
   } finally {
     reopened.close();
   }
+});
+
+test("/send delivers the image before its own confirmation text, so the pair stays adjacent", async (t) => {
+  const f = fixture(t);
+  // The project must sit outside the bridge data directory, which /send refuses to read.
+  const project = mkdtempSync(join(tmpdir(), "pw-send-project-"));
+  t.after(() => rmSync(project, { recursive: true, force: true }));
+  f.config.pocketUrl = "http://127.0.0.1:8787";
+  f.pocket.directory = project;
+  await writeFile(join(project, "chart.png"), png);
+  await f.bridge.initialize();
+  f.input("/resume 2");
+  await f.bridge.processNext();
+  while (await f.bridge.deliverNext()) {}
+  const order: string[] = [];
+  const sendMedia = f.weixin.sendMedia.bind(f.weixin);
+  f.weixin.sendMedia = async (peer, item, id, token) => {
+    order.push("media");
+    await sendMedia(peer, item, id, token);
+  };
+  const send = f.weixin.send.bind(f.weixin);
+  f.weixin.send = async (peer, text, id, token) => {
+    order.push(text.includes("已排队发送") ? "text:receipt" : "text:other");
+    await send(peer, text, id, token);
+  };
+  f.input("/send chart.png");
+  await f.bridge.processNext();
+  while (await f.bridge.deliverNext()) {}
+  assert.deepEqual(order, ["media", "text:receipt"]);
 });
 
 test("switching while media upload is in flight cancels send and cannot revive the old reply", async (t) => {
