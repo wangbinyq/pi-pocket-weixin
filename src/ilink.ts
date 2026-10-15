@@ -15,6 +15,24 @@ const Envelope = z.object({
   errmsg: z.string().optional(),
   msg: z.string().optional(),
 });
+const Item = z.object({
+  type: z.number(),
+  text_item: z.object({ text: z.string() }).optional(),
+  ref_msg: z
+    .object({ title: z.string().optional(), message_item: z.unknown().optional() })
+    .optional(),
+});
+function quotedText(value: unknown, depth = 0): { text: string; unsupported: boolean } {
+  const parsed = Item.safeParse(value);
+  if (!parsed.success || depth >= 8 || parsed.data.type !== 1 || !parsed.data.text_item)
+    return { text: "", unsupported: true };
+  const item = parsed.data;
+  const text = item.text_item!.text;
+  if (!item.ref_msg?.message_item) return { text, unsupported: false };
+  const quote = quotedText(item.ref_msg.message_item, depth + 1);
+  const context = [item.ref_msg.title, quote.text].filter(Boolean).join(" | ");
+  return { text: context ? `[引用: ${context}]\n${text}` : text, unsupported: quote.unsupported };
+}
 const Message = z.object({
   message_id: z.union([z.string().min(1), z.number().int().safe()]).transform(String),
   from_user_id: z.string().min(1),
@@ -23,9 +41,7 @@ const Message = z.object({
   room_id: z.string().optional(),
   chat_room_id: z.string().optional(),
   context_token: z.string().optional(),
-  item_list: z.array(
-    z.object({ type: z.number(), text_item: z.object({ text: z.string() }).optional() }),
-  ),
+  item_list: z.array(Item),
 });
 export interface Incoming {
   messageId: string;
@@ -55,6 +71,19 @@ export class ILinkError extends Error {
     this.kind = kind;
   }
 }
+function parseILinkJson(text: string): unknown {
+  return JSON.parse(text, (key: string, value: unknown, context?: { source?: string }) => {
+    if (
+      key === "message_id" &&
+      typeof value === "number" &&
+      !Number.isSafeInteger(value) &&
+      context?.source &&
+      /^\d+$/.test(context.source)
+    )
+      return context.source;
+    return value;
+  }) as unknown;
+}
 function checkEnvelope(value: unknown): void {
   const result = Envelope.parse(value);
   if (
@@ -77,8 +106,9 @@ export function incomingFor(value: unknown, account: Account): Incoming | undefi
     (msg.message_type !== undefined && msg.message_type !== 1)
   )
     return undefined;
-  const text = msg.item_list
-    .flatMap((item) => (item.type === 1 && item.text_item ? [item.text_item.text] : []))
+  const items = msg.item_list.map((item) => quotedText(item));
+  const text = items
+    .map((item) => item.text)
     .join("\n")
     .trim();
   return {
@@ -86,7 +116,7 @@ export function incomingFor(value: unknown, account: Account): Incoming | undefi
     peer: msg.from_user_id,
     text: text.slice(0, 32_000),
     contextToken: msg.context_token,
-    unsupported: !text || text.length > 32_000 || msg.item_list.some((item) => item.type !== 1),
+    unsupported: !text || text.length > 32_000 || items.some((item) => item.unsupported),
   };
 }
 
@@ -130,6 +160,7 @@ export class ILink implements WeixinPort {
       },
       timeout,
       signal,
+      parseILinkJson,
     );
     checkEnvelope(value);
     return value;

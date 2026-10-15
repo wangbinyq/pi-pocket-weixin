@@ -14,6 +14,7 @@ export async function requestJson(
   init: RequestInit,
   timeout: number,
   signal?: AbortSignal,
+  parse: (text: string) => unknown = JSON.parse,
 ): Promise<unknown> {
   const deadline = AbortSignal.timeout(timeout);
   const response = await fetcher(url, {
@@ -41,7 +42,7 @@ export async function requestJson(
     await reader.cancel();
   }
   try {
-    return JSON.parse(Buffer.concat(chunks).toString("utf8")) as unknown;
+    return parse(Buffer.concat(chunks).toString("utf8"));
   } catch {
     throw new Error(`Invalid JSON from ${new URL(url).hostname}`);
   }

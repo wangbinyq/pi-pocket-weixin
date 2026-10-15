@@ -9,16 +9,14 @@ import { type Job, Store } from "./store.ts";
 const HELP = `Pi Pocket 微信桥接
 /pip — 连接 PiP 管家
 /sessions — 列出最近 30 个会话，显示固定 ID
-/use <ID> — 连接指定会话
+/resume <ID> — 恢复指定会话
 /new [标题] — 新建并连接会话
 /status — 当前目标和待发送消息
-/watching — 当前回报订阅
-/unwatch <ID> — 停止该会话的微信回报（不停止任务）
-/retry — 重试暂停的微信发送
+/retry-send — 重试暂停的微信发送（不重新运行模型）
 /help — 帮助
 
 普通文字发送到当前目标，忙时排队。
-连接会话会订阅其后续最终回复，包括网页消息和定时任务产生的回复；切换不会关闭旧订阅。
+仅同步当前会话的新最终回复；切换取消旧会话待发回复，不停止旧任务，也不补发离开期间的回复。
 审批、模型选择和文件操作请打开 Pocket；首版仅支持本人私聊和文字。`;
 
 export class Bridge {
@@ -47,6 +45,7 @@ export class Bridge {
   async initialize(): Promise<void> {
     this.#userId = await this.pocket.principal();
     this.store.bind(this.account, this.config.pocketUrl, this.#userId);
+    this.store.reconcile();
     if (!this.store.target()) await this.#select(await this.pocket.pip());
   }
   async #authorize(): Promise<void> {
@@ -57,14 +56,8 @@ export class Bridge {
     return `【#${target.id} ${oneLine(target.title)}】`;
   }
   async #select(target: Target): Promise<void> {
-    const current = this.store.watches();
-    if (!current.some((watch) => watch.id === target.id) && current.length >= 20)
-      throw new CommandError("最多订阅 20 个会话，请先 /unwatch <ID>。");
     const head = await this.pocket.head(target.id);
-    this.store.transaction(() => {
-      this.store.watch(target, head);
-      this.store.setTarget(target);
-    });
+    this.store.select(target, head);
   }
   async receive(signal?: AbortSignal): Promise<void> {
     const batch = await this.weixin.updates(this.store.get("syncCursor") || "", signal);
@@ -73,16 +66,21 @@ export class Bridge {
       return msg ? [msg] : [];
     });
     this.store.ingest(this.account, batch.cursor, messages);
+    if (batch.messages.length) {
+      this.log(
+        `Weixin intake: received=${batch.messages.length}, accepted=${messages.length}, filtered=${batch.messages.length - messages.length}. No message bodies are logged.`,
+      );
+    }
   }
   async processNext(): Promise<boolean> {
-    const job = this.store.job();
+    const job = this.store.prepareJob(this.config.textBatchDelayMs ?? 300);
     if (!job || job.due > Date.now()) return false;
     try {
       await this.#authorize();
       if (job.creating) {
         this.store.finish(
           job.key,
-          "上次 /new 的结果不确定，已停止自动重试，避免重复建会话。请 /sessions 检查，再 /use <ID>。",
+          "上次 /new 的结果不确定，已停止自动重试，避免重复建会话。请 /sessions 检查，再 /resume <ID>。",
         );
       } else if (job.unsupported) {
         this.store.finish(
@@ -95,12 +93,13 @@ export class Bridge {
         const target = job.target
           ? TargetSchema.parse(JSON.parse(job.target))
           : this.store.target();
-        if (!target) throw new CommandError("没有目标会话，请先 /pip 或 /use <ID>。");
+        if (!target) throw new CommandError("没有目标会话，请先 /pip 或 /resume <ID>。");
         this.store.pinJob(job.key, target);
-        if (!this.store.watches().some((watch) => watch.id === target.id)) {
-          const cursor = await this.pocket.head(target.id);
-          this.store.watch(target, cursor);
-        }
+        if (
+          this.store.target()?.id === target.id &&
+          !this.store.watches().some((watch) => watch.id === target.id)
+        )
+          await this.#select(target);
         await this.pocket.submit(target.id, job.text, job.key);
         this.store.finish(job.key);
       }
@@ -129,7 +128,7 @@ export class Bridge {
       case "/help":
         response = HELP;
         break;
-      case "/retry":
+      case "/retry-send":
         this.store.retryDeliveries();
         response = "已重新排队发送暂停的回复。网络结果不确定时，微信可能收到重复消息。";
         break;
@@ -144,16 +143,16 @@ export class Bridge {
                 `#${session.id} ${oneLine(session.title || "New session")} · ${session.waiting ? "待审批" : session.busy ? "工作中" : "空闲"}${session.archived ? " · 已归档" : ""}`,
             )
             .join("\n") +
-          "\n\n/use <ID> 切换；/pip 返回管家。";
+          "\n\n/resume <ID> 恢复会话；/pip 返回管家。";
         break;
       }
       case "/pip":
-      case "/use": {
+      case "/resume": {
         let target: Target;
         if (command === "/pip") target = await this.pocket.pip();
         else {
           if (!Number.isSafeInteger(id) || id <= 0)
-            throw new CommandError("用法：/use <固定会话 ID>，先 /sessions 查看。");
+            throw new CommandError("用法：/resume <固定会话 ID>，先 /sessions 查看。");
           const session = (await this.pocket.sessions()).find((entry) => entry.id === id);
           if (!session) throw new CommandError("找不到可访问的会话；PiP 请用 /pip 连接。");
           target = { id, title: session.title || "New session", pip: false };
@@ -163,8 +162,6 @@ export class Bridge {
         break;
       }
       case "/new": {
-        if (this.store.watches().length >= 20)
-          throw new CommandError("订阅已满，请先 /unwatch <ID>。");
         this.store.markCreating(job.key);
         let target: Target;
         try {
@@ -172,7 +169,7 @@ export class Bridge {
         } catch {
           this.store.finish(
             job.key,
-            "新建请求的结果不确定，未自动重试。请 /sessions 检查是否已创建，再 /use <ID>；也可在网页新建。",
+            "新建请求的结果不确定，未自动重试。请 /sessions 检查是否已创建，再 /resume <ID>；也可在网页新建。",
           );
           return;
         }
@@ -186,20 +183,9 @@ export class Bridge {
         response = `${target ? this.#label(target) : "未连接"}\n${running?.approvals ? "等待网页审批" : running?.busy ? "工作中" : "空闲"}\n待发送 ${counts.pending}，需用户发消息恢复 ${counts.blocked}，发送暂停 ${counts.failed}\n${target ? this.pocket.link(target.id) : ""}`;
         break;
       }
-      case "/watching":
+      case "/retry":
         response =
-          "回报订阅（切换后仍保留）：\n" +
-          this.store
-            .watches()
-            .map((watch) => this.#label(watch))
-            .join("\n") +
-          "\n/unwatch <ID> 停止同步。";
-        break;
-      case "/unwatch":
-        if (!Number.isSafeInteger(id) || !this.store.watches().some((watch) => watch.id === id))
-          throw new CommandError("用法：/unwatch <已订阅的会话 ID>，先 /watching 查看。");
-        this.store.unwatch(id);
-        response = `已停止 #${id} 的回报并取消未发送的该会话回复；任务不受影响。再次向它发消息会重新订阅。`;
+          "这里暂不支持 Hermes 的 /retry（重新回答）。要恢复微信发送队列，请用 /retry-send；重新执行任务请明确发送新请求。";
         break;
       default:
         throw new CommandError(
@@ -209,34 +195,35 @@ export class Bridge {
     this.store.finish(job.key, response);
   }
   #connected(target: Target): string {
-    return `${this.#label(target)} 已连接。\n后续文字直接发送到此会话。其新的最终回复（含网页和定时任务）将同步到微信；切换保留旧订阅。/unwatch ${target.id} 停止回报。\n${this.pocket.link(target.id)}`;
+    return `${this.#label(target)} 已连接。\n后续文字发送到此会话，仅同步当前会话的新最终回复。切换不停止旧任务，不补发离开期间的回复。\n${this.pocket.link(target.id)}`;
   }
   async collect(): Promise<void> {
     await this.#authorize();
     const running = await this.pocket.running();
+    const generation = this.store.generation();
     for (const watch of this.store.watches()) {
       let entries;
       try {
         entries = await this.pocket.after(watch.id, watch.cursor);
       } catch (error) {
         if (error instanceof HttpError && [403, 404].includes(error.status)) {
-          this.store.unwatch(watch.id);
+          if (this.store.generation() === generation) this.store.unwatch(watch.id);
           continue;
         }
         throw error;
       }
       const current = this.store.watches().find((item) => item.id === watch.id);
-      if (!current) continue;
+      if (
+        !current ||
+        this.store.target()?.id !== watch.id ||
+        this.store.generation() !== generation
+      )
+        continue;
       this.store.transaction(() => {
         for (const entry of entries) {
           if (entry.id <= current.cursor) continue;
           const text = finalText(entry);
-          if (text)
-            this.store.enqueue(
-              `reply:${watch.id}:${entry.id}`,
-              `${this.#label(watch)}\n${text}`,
-              watch.id,
-            );
+          if (text) this.store.enqueue(`reply:${watch.id}:${entry.id}`, text, watch.id);
           this.store.advance(watch.id, entry.id);
         }
         const approvals = running.find((item) => item.id === watch.id)?.approvals || 0;
@@ -254,19 +241,26 @@ export class Bridge {
   async deliverNext(signal?: AbortSignal): Promise<boolean> {
     const row = this.store.delivery();
     if (!row || row.state !== "pending" || row.due > Date.now()) return false;
+    const generation = this.store.generation();
+    const eligible = () =>
+      this.store.isPending(row.key) &&
+      (row.conversation === null ||
+        (this.store.target()?.id === row.conversation &&
+          this.store.generation() === generation &&
+          this.store.watches().some((watch) => watch.id === row.conversation)));
     await this.#authorize();
     if (row.conversation !== null) {
       try {
         await this.pocket.head(row.conversation);
       } catch (error) {
         if (error instanceof HttpError && [403, 404].includes(error.status)) {
-          this.store.unwatch(row.conversation);
+          if (eligible()) this.store.unwatch(row.conversation);
           return false;
         }
         throw error;
       }
-      if (!this.store.watches().some((watch) => watch.id === row.conversation)) return false;
     }
+    if (!eligible()) return false;
     const context = this.store.get("contextToken");
     try {
       try {
@@ -275,6 +269,7 @@ export class Bridge {
         if (!(error instanceof ILinkError && ["session", "auth"].includes(error.kind) && context))
           throw error;
         if (this.store.get("contextToken") === context) this.store.set("contextToken", "");
+        if (!eligible()) return false;
         await this.weixin.send(
           this.account.peer,
           row.text,
@@ -296,20 +291,29 @@ export class Bridge {
       this.log(
         blocked
           ? "Weixin reply session is unavailable; send the bot a message or log in again."
-          : "Weixin delivery deferred; check doctor or use /retry if paused.",
+          : "Weixin delivery deferred; check doctor or use /retry-send if paused.",
       );
       return false;
     }
   }
   async run(signal: AbortSignal): Promise<void> {
     const loop = async (task: () => Promise<unknown>, delay: number, label: string) => {
+      let failures = 0;
       while (!signal.aborted) {
         let pause = delay;
         try {
           await task();
+          failures = 0;
         } catch (error) {
           if (signal.aborted) break;
-          pause = error instanceof ILinkError && error.kind === "auth" ? 600_000 : 5000;
+          failures++;
+          if (error instanceof ILinkError && ["auth", "session"].includes(error.kind)) {
+            pause = 600_000;
+            failures = 0;
+          } else {
+            pause = failures >= 3 ? 30_000 : 2000;
+            if (failures >= 3) failures = 0;
+          }
           this.log(
             `${label} paused${error instanceof ILinkError ? ` (${error.kind})` : ""}; check credentials/network. No message bodies are logged.`,
           );

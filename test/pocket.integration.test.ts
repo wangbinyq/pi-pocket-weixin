@@ -78,7 +78,7 @@ test(
     await bridge.initialize();
     const pipId = f.store.target()!.id;
     assert.notEqual(pipId, first.id);
-    f.input(`/use ${first.id}`);
+    f.input(`/resume ${first.id}`);
     assert.equal(await bridge.processNext(), true);
     assert.equal(f.store.target()?.id, first.id);
     const baseline = await pocket.head(first.id);
@@ -113,6 +113,33 @@ test(
       /* drain */
     }
     assert.ok(f.weixin.sent.some((entry) => /echo:[\s\S]*hello from Weixin/.test(entry.text)));
+    const inactiveHead = await pocket.head(first.id);
+    await pocket.submit(
+      first.id,
+      "inactive conversation must stay on web",
+      "integration-inactive-request",
+    );
+    await waitForReply(first.id, inactiveHead);
+    await bridge.collect();
+    while (await bridge.deliverNext()) {}
+    assert.ok(
+      f.weixin.sent.every(
+        (entry) => !entry.text.includes("inactive conversation must stay on web"),
+      ),
+    );
+    f.input(`/resume ${first.id}`);
+    await bridge.processNext();
+    await bridge.collect();
+    while (await bridge.deliverNext()) {}
+    assert.ok(
+      f.weixin.sent.every(
+        (entry) => !entry.text.includes("inactive conversation must stay on web"),
+      ),
+    );
+    assert.deepEqual(
+      f.store.watches().map((watch) => watch.id),
+      [first.id],
+    );
     f.input("/new integration project");
     await bridge.processNext();
     const created = (await pocket.sessions()).find(

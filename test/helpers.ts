@@ -88,6 +88,7 @@ export function fixture(t: TestContext) {
     pocketUrl: "https://pocket.example.com",
     pocketToken: "test-pocket-token",
     publicUrl: "https://pocket.example.com",
+    textBatchDelayMs: 0,
   };
   const bridge = new Bridge(store, pocket, weixin, account, config, () => {});
   t.after(() => {

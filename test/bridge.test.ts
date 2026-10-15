@@ -5,14 +5,14 @@ import { ILinkError } from "../src/ilink.ts";
 import { Store } from "../src/store.ts";
 import { account, fixture } from "./helpers.ts";
 
-test("default PiP, fixed-ID switching and independent old-session replies", async (t) => {
+test("default PiP, fixed-ID resume and only current-session replies without labels", async (t) => {
   const f = fixture(t);
   f.reply(1, 10, "old history must not be forwarded");
   await f.bridge.initialize();
   assert.equal(f.store.target()?.id, 1);
   f.input("first task");
   await f.bridge.processNext();
-  f.input("/use 2");
+  f.input("/resume 2");
   await f.bridge.processNext();
   f.input("second task");
   await f.bridge.processNext();
@@ -27,8 +27,8 @@ test("default PiP, fixed-ID switching and independent old-session replies", asyn
     /* drain */
   }
   const text = f.weixin.sent.map((item) => item.text).join("\n");
-  assert.match(text, /#1 Pi in Pocket.*\nold task finished/);
-  assert.match(text, /#2 Session 2.*\nnew task finished/);
+  assert.doesNotMatch(text, /old task finished/);
+  assert.ok(f.weixin.sent.some((item) => item.text === "new task finished"));
   assert.doesNotMatch(text, /old history must not/);
   await f.bridge.collect();
   assert.equal(f.store.delivery(), undefined);
@@ -42,7 +42,7 @@ test("inbox retries keep the pinned route and idempotency key", async (t) => {
   await f.bridge.processNext();
   const original = f.store.job();
   assert.ok(original?.target);
-  f.store.setTarget({ id: 2, title: "Session 2", pip: false });
+  f.store.select({ id: 2, title: "Session 2", pip: false }, 0);
   f.store.db.prepare("UPDATE inbox SET due=0").run();
   f.pocket.failSubmit = false;
   await f.bridge.processNext();
@@ -117,7 +117,7 @@ test("receive atomically stores inbox, token and cursor; duplicate cannot roll t
 test("restart retains routing, inbox, outgoing IDs and watermark", async (t) => {
   const f = fixture(t);
   await f.bridge.initialize();
-  f.input("/use 2");
+  f.input("/resume 2");
   await f.bridge.processNext();
   f.input("pending");
   f.reply(2, 7, "durable reply");
@@ -172,21 +172,26 @@ test("successful new-session creation atomically selects and acknowledges", asyn
   assert.match(f.store.delivery()?.text || "", /#101 project/);
 });
 
-test("unwatch cancels pending replies, re-subscribe does not replay old history", async (t) => {
+test("resume cancels pending old replies, returning does not replay missed history", async (t) => {
   const f = fixture(t);
   await f.bridge.initialize();
   f.reply(1, 20, "do not send");
   await f.bridge.collect();
-  f.input("/unwatch 1");
+  f.input("/resume 2");
   await f.bridge.processNext();
   while (await f.bridge.deliverNext()) {
     /* drain */
   }
   assert.ok(f.weixin.sent.every((item) => !item.text.includes("do not send")));
-  f.input("new work");
+  f.reply(1, 21, "finished while away");
+  f.input("/pip");
   await f.bridge.processNext();
+  while (await f.bridge.deliverNext()) {}
   await f.bridge.collect();
   assert.equal(f.store.delivery(), undefined);
+  f.reply(1, 22, "new current reply");
+  await f.bridge.collect();
+  assert.equal(f.store.delivery()?.text, "new current reply");
 });
 
 test("stale context retries once without token and persists token removal", async (t) => {

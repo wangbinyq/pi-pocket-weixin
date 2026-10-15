@@ -28,6 +28,7 @@ export interface Config {
   pocketToken: string;
   publicUrl: string;
   newCwd?: string;
+  textBatchDelayMs?: number;
 }
 export function dataDirectory(): string {
   return resolve(process.env.WEIXIN_DATA_DIR || join(homedir(), ".local/share/pi-pocket-weixin"));
@@ -44,6 +45,12 @@ export function loadConfig(): Config {
     pocketToken,
     publicUrl: pocketBase(process.env.POCKET_PUBLIC_URL || pocketUrl),
     newCwd: process.env.POCKET_NEW_CWD || undefined,
+    textBatchDelayMs: z.coerce
+      .number()
+      .finite()
+      .min(0)
+      .max(2000)
+      .parse(process.env.WEIXIN_TEXT_BATCH_DELAY_MS ?? 300),
   };
 }
 export function privateDirectory(path: string): void {

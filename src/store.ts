@@ -46,12 +46,11 @@ export class Store {
     const version = z
       .object({ user_version: z.number() })
       .parse(this.db.prepare("PRAGMA user_version").get()).user_version;
-    if (version !== 0 && version !== 1) {
+    if (![0, 1, 2].includes(version)) {
       this.db.close();
       throw new Error("Unsupported bridge database version");
     }
     this.db.exec(`
-      PRAGMA user_version=1;
       PRAGMA journal_mode=WAL;
       PRAGMA synchronous=FULL;
       CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
@@ -73,6 +72,14 @@ export class Store {
       CREATE INDEX IF NOT EXISTS outbox_pending ON outbox(state, seq);
       CREATE INDEX IF NOT EXISTS inbox_pending ON inbox(done, seq);
     `);
+    if (version < 2)
+      this.transaction(() => {
+        this.db.exec(
+          "ALTER TABLE inbox ADD COLUMN received INTEGER NOT NULL DEFAULT 0;" +
+            "ALTER TABLE inbox ADD COLUMN sealed INTEGER NOT NULL DEFAULT 0;" +
+            "PRAGMA user_version=2;",
+        );
+      });
   }
   close(): void {
     this.db.close();
@@ -117,8 +124,8 @@ export class Store {
         if (msg.peer !== account.peer) throw new Error("Cannot store an unpaired sender");
         const key = stableId(account.accountId, msg.peer, msg.messageId);
         const inserted = this.db
-          .prepare("INSERT OR IGNORE INTO inbox(key,text,unsupported) VALUES(?,?,?)")
-          .run(key, msg.text, Number(msg.unsupported));
+          .prepare("INSERT OR IGNORE INTO inbox(key,text,unsupported,received) VALUES(?,?,?,?)")
+          .run(key, msg.text, Number(msg.unsupported), Date.now());
         if (Number(inserted.changes) > 0 && msg.contextToken)
           this.set("contextToken", msg.contextToken);
       }
@@ -133,12 +140,83 @@ export class Store {
     const raw = this.get("target");
     return raw ? TargetSchema.parse(JSON.parse(raw)) : undefined;
   }
-  setTarget(target: Target): void {
+  generation(): string {
+    return this.get("routeGeneration") || "0";
+  }
+  reconcile(): void {
+    this.transaction(() => this.#retireOthers(this.target()?.id));
+  }
+  #retireOthers(id?: number): void {
+    this.db
+      .prepare("UPDATE watches SET active=0,approval=0 WHERE id!=? OR ? IS NULL")
+      .run(id ?? null, id ?? null);
+    this.db
+      .prepare(
+        "UPDATE outbox SET state='cancelled',text='' WHERE conversation IS NOT NULL AND state!='sent' AND NOT EXISTS (SELECT 1 FROM watches WHERE watches.id=outbox.conversation AND active=1)",
+      )
+      .run();
+  }
+  select(target: Target, cursor: number): void {
+    this.transaction(() => this.#select(target, cursor));
+  }
+  #select(target: Target, cursor: number): void {
+    if (this.target()?.id !== target.id || !this.watches().some((w) => w.id === target.id))
+      this.set("routeGeneration", String(Number(this.generation()) + 1));
+    this.#retireOthers(target.id);
+    this.watch(target, cursor);
     this.set("target", JSON.stringify(target));
   }
   job(): Job | undefined {
     const row = this.db.prepare("SELECT * FROM inbox WHERE done=0 ORDER BY seq LIMIT 1").get();
     return row ? JobSchema.parse(row) : undefined;
+  }
+  prepareJob(delay: number): Job | undefined {
+    const row = this.db.prepare("SELECT * FROM inbox WHERE done=0 ORDER BY seq LIMIT 1").get();
+    if (!row) return undefined;
+    const first = JobSchema.extend({ sealed: z.number(), received: z.number() }).parse(row);
+    if (
+      !delay ||
+      !first.received ||
+      first.sealed ||
+      first.target ||
+      first.unsupported ||
+      first.text.startsWith("/") ||
+      first.creating
+    )
+      return first;
+    const rows = z
+      .array(JobSchema.extend({ sealed: z.number(), received: z.number() }))
+      .parse(this.db.prepare("SELECT * FROM inbox WHERE done=0 ORDER BY seq LIMIT 101").all());
+    const batch = [first];
+    let text = first.text;
+    let boundary = false;
+    const quiet = (text: string) => Math.max(delay, Array.from(text).length >= 1800 ? 1000 : 0);
+    for (const next of rows.slice(1)) {
+      const previous = batch.at(-1)!;
+      if (
+        next.sealed ||
+        next.target ||
+        next.unsupported ||
+        next.creating ||
+        next.text.startsWith("/") ||
+        next.received - previous.received > quiet(previous.text) ||
+        text.length + next.text.length + 1 > 32_000 ||
+        batch.length >= 100
+      ) {
+        boundary = true;
+        break;
+      }
+      batch.push(next);
+      text += "\n" + next.text;
+    }
+    const last = batch.at(-1)!;
+    if (!boundary && Date.now() < last.received + quiet(last.text)) return undefined;
+    this.transaction(() => {
+      this.db.prepare("UPDATE inbox SET text=?,sealed=1 WHERE key=?").run(text, first.key);
+      for (const member of batch.slice(1))
+        this.db.prepare("UPDATE inbox SET done=1,text='' WHERE key=?").run(member.key);
+    });
+    return { ...first, text };
   }
   pinJob(key: string, target: Target): void {
     this.db
@@ -150,10 +228,7 @@ export class Store {
   }
   finish(key: string, response?: string, created?: Target): void {
     this.transaction(() => {
-      if (created) {
-        this.watch(created, 0);
-        this.setTarget(created);
-      }
+      if (created) this.#select(created, 0);
       if (response) this.enqueue(`command:${key}`, response);
       this.db.prepare("UPDATE inbox SET done=1,text='' WHERE key=?").run(key);
     });
@@ -209,12 +284,17 @@ export class Store {
       .get();
     return row ? DeliverySchema.parse(row) : undefined;
   }
+  isPending(key: string): boolean {
+    return !!this.db.prepare("SELECT 1 FROM outbox WHERE key=? AND state='pending'").get(key);
+  }
   sent(key: string): void {
     this.db.prepare("UPDATE outbox SET state='sent',text='' WHERE key=?").run(key);
   }
   deliveryFailed(row: Delivery, blocked: boolean, delay = 0): void {
     this.db
-      .prepare("UPDATE outbox SET state=?,attempts=attempts+1,due=? WHERE key=?")
+      .prepare(
+        "UPDATE outbox SET state=?,attempts=attempts+1,due=? WHERE key=? AND state='pending'",
+      )
       .run(
         blocked ? "blocked" : row.attempts >= 7 ? "failed" : "pending",
         Date.now() + Math.max(delay, Math.min(300_000, 2000 * 2 ** row.attempts)),

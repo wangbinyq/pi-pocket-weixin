@@ -19,9 +19,9 @@ process.once("SIGINT", stop);
 process.once("SIGTERM", stop);
 
 async function main(): Promise<void> {
-  if (!["start", "login", "doctor", "retry"].includes(command)) {
+  if (!["start", "login", "doctor", "retry-send"].includes(command)) {
     console.log(
-      "pi-pocket-weixin\n  npm run login   Scan a Weixin QR; saves private credentials\n  npm run doctor  Check Pocket auth and local configuration\n  npm start       Start the bridge\n  node src/cli.ts retry  Retry paused deliveries (stop the bridge first)",
+      "pi-pocket-weixin\n  npm run login   Scan a Weixin QR; saves private credentials\n  npm run doctor  Check Pocket auth and local configuration\n  npm start       Start the bridge\n  node src/cli.ts retry-send  Retry paused deliveries (stop the bridge first)",
     );
     return;
   }
@@ -54,7 +54,7 @@ async function main(): Promise<void> {
     }
     const store = new Store(dir);
     try {
-      if (command === "retry") {
+      if (command === "retry-send") {
         store.retryDeliveries();
         console.log(
           "Paused replies queued for retry; restart the bridge. Ambiguous sends may duplicate.",
