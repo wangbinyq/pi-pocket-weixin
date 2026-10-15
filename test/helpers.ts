@@ -13,6 +13,7 @@ import type {
   Running,
   Target,
   PocketModel,
+  Diagnostics,
 } from "../src/pocket.ts";
 import { Store } from "../src/store.ts";
 import type { Attachment, MediaBlob, MediaRef } from "../src/media.ts";
@@ -116,6 +117,13 @@ export class FakePocket implements PocketPort {
   }
   async reset(id: number, note?: string): Promise<void> {
     this.resets.push({ id, ...(note === undefined ? {} : { note }) });
+  }
+  diagnosticData: Diagnostics = {};
+  diagnosticIds: number[] = [];
+  async diagnostics(id: number): Promise<Diagnostics> {
+    await this.head(id);
+    this.diagnosticIds.push(id);
+    return this.diagnosticData;
   }
   async running(): Promise<Running[]> {
     return this.active;

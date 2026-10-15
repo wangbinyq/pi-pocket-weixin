@@ -1,7 +1,10 @@
 import { z } from "zod";
 import { setTimeout as sleep } from "node:timers/promises";
 import type { Account, Config } from "./config.ts";
-import { oneLine } from "./format.ts";
+import { oneLine, splitText, stableId } from "./format.ts";
+import { PocketLinks } from "./pocket-links.ts";
+import { statusText } from "./status.ts";
+import { bridgeVersion } from "./runtime.ts";
 import { HttpError } from "./http.ts";
 import { ILinkError, incomingFor, type WeixinPort } from "./ilink.ts";
 import { finalText, type PocketPort, type Target, TargetSchema } from "./pocket.ts";
@@ -29,7 +32,7 @@ const HELP = `Pi Pocket 微信桥接
 /model [provider/id] [思考级别] — 列出或切换模型
 /busy [queue|steer|interrupt] — 忙时输入策略
 /send <项目内路径> — 显式发送当前项目的图片或文件
-/status — 当前目标和待发送消息
+/status — 会话、模型/上下文、队列、24h窗口和桥接版本
 /retry-send — 重试暂停的微信发送（不重新运行模型）
 /help — 帮助
 
@@ -45,6 +48,8 @@ export class Bridge {
   readonly config: Config;
   readonly log: (message: string) => void;
   readonly media: MediaCache;
+  readonly links: PocketLinks;
+  readonly startedAt = Date.now();
   #userId = "";
   #typingAt = 0;
   #typingActive = false;
@@ -57,6 +62,8 @@ export class Bridge {
     log: (message: string) => void = console.log,
   ) {
     this.media = new MediaCache(config.dataDir);
+    this.links = new PocketLinks(config.pocketUrl, config.publicUrl);
+    store.outboundText = (text) => this.links.rewrite(text);
     this.store = store;
     this.pocket = pocket;
     this.weixin = weixin;
@@ -371,10 +378,33 @@ export class Bridge {
       }
       case "/status": {
         const target = this.store.target();
-        const running = (await this.pocket.running()).find((entry) => entry.id === target?.id);
+        let running;
+        let runningKnown = false;
+        try {
+          running = (await this.pocket.running()).find((entry) => entry.id === target?.id);
+          runningKnown = true;
+        } catch {
+          /* Keep local diagnostics usable when Pocket is unavailable. */
+        }
+        const diagnostics = target
+          ? await this.pocket.diagnostics(target.id).catch(() => ({}))
+          : {};
         const counts = this.store.counts();
-        response = `${target ? this.#label(target) : "未连接"}\n${running?.approvals ? "等待网页审批" : running?.busy ? "工作中" : "空闲"}\n待发送 ${counts.pending}，需用户发消息恢复 ${counts.blocked}，发送暂停 ${counts.failed}\n${target ? this.pocket.link(target.id) : ""}`;
-        break;
+        response =
+          statusText({
+            target,
+            watch: this.store.watches().find((watch) => watch.id === target?.id),
+            diagnostics,
+            running,
+            runningKnown,
+            counts: { ...counts, inbox: Math.max(0, counts.inbox - 1) },
+            lastInboundAt: this.store.lastInboundAt(),
+            version: bridgeVersion,
+            startedAt: this.startedAt,
+            now: Date.now(),
+          }) + (target ? "\n" + this.pocket.link(target.id) : "");
+        this.store.finish(job.key, response, undefined, undefined, true);
+        return;
       }
       case "/retry":
         response =
@@ -473,10 +503,22 @@ export class Bridge {
         if (!eligible()) return false;
         this.store.saveWire(row.key, JSON.stringify(wire));
       }
-      const send = (token?: string) =>
-        wire
-          ? this.weixin.sendMedia(this.account.peer, wire, row.key, token, signal)
-          : this.weixin.send(this.account.peer, row.text, row.key, token, signal);
+      const send = async (token?: string) => {
+        if (wire) return this.weixin.sendMedia(this.account.peer, wire, row.key, token, signal);
+        const text = this.links.rewrite(row.text);
+        const chunks = Array.from(text).length > 1800 ? splitText(text) : [text];
+        for (const [index, chunk] of chunks.entries()) {
+          if (!eligible()) return;
+          await this.weixin.send(
+            this.account.peer,
+            chunk,
+            chunks.length === 1 ? row.key : stableId(row.key, "public-link", String(index)),
+            token,
+            signal,
+          );
+          if (index < chunks.length - 1) await sleep(1500, undefined, { signal });
+        }
+      };
       if (!eligible()) return false;
       try {
         await send(context || undefined);

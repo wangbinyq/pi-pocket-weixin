@@ -18,6 +18,8 @@
 
 新增 typing ticket 缓存和输入中提示，失败不影响任务；文本按段落和 fenced code 分片，超长代码块闭合后重开。图片、文件及其引用通过微信 CDN 下载解密、上传 Pocket 后随同文字提交，不允许只执行缺少附件的残缺任务。
 
+`/status` 是本桥接的短诊断：复用 Pocket 已有 owner 认证 poll/view/close（不改 Pocket）获取当前模型与上下文，估算明确标记，缺失 unknown；显示路由/队列 blocked/failed、接收时间推算的 24h 参考及桥接版本/启动。诊断回执可越过暂停队列但不重试普通回复。所有出站 Pocket 链接统一改为 POCKET_PUBLIC_URL；未配置明确隐藏链接，不回退内网地址。
+
 ## 保留的差异
 
 | 项目         | Hermes 参考实现                                                           | 本桥接                                                                                                         |

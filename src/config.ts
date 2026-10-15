@@ -26,7 +26,7 @@ export interface Config {
   dataDir: string;
   pocketUrl: string;
   pocketToken: string;
-  publicUrl: string;
+  publicUrl?: string;
   newCwd?: string;
   textBatchDelayMs?: number;
 }
@@ -43,7 +43,9 @@ export function loadConfig(): Config {
     dataDir: dataDirectory(),
     pocketUrl,
     pocketToken,
-    publicUrl: pocketBase(process.env.POCKET_PUBLIC_URL || pocketUrl),
+    publicUrl: process.env.POCKET_PUBLIC_URL
+      ? pocketBase(process.env.POCKET_PUBLIC_URL)
+      : undefined,
     newCwd: process.env.POCKET_NEW_CWD || undefined,
     textBatchDelayMs: z.coerce
       .number()

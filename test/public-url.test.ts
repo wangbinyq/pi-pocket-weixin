@@ -21,7 +21,7 @@ test("public link configuration is separate from credentialed API traffic", asyn
   assert.deepEqual(urls, ["http://127.0.0.1:8787/api/me"]);
   assert.equal(
     new Pocket("http://127.0.0.1:8787", "test-token").link(12),
-    "http://127.0.0.1:8787/s/12",
+    "Pocket 公网链接未配置（请设置 POCKET_PUBLIC_URL 后在网页查看）。",
   );
 });
 
@@ -66,7 +66,7 @@ test("loadConfig reads the public origin and rejects credential-bearing or non-o
       assert.throws(() => loadConfig());
     }
     delete process.env.POCKET_PUBLIC_URL;
-    assert.equal(loadConfig().publicUrl, "http://127.0.0.1:8787");
+    assert.equal(loadConfig().publicUrl, undefined);
   } finally {
     process.env = previous;
   }

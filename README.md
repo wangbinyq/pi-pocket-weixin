@@ -78,7 +78,7 @@ npm start
 | `/model [provider/id] [思考级别]` | 列出已配置模型，或显式切换当前会话                          |
 | `/busy [queue                     | steer                                                       | interrupt]` | 查看/设置并持久化忙时策略，默认 queue |
 | `/send <项目内路径>`              | 显式发送当前项目的图片或文件，仅同机 Linux loopback 部署    |
-| `/status`                         | 当前目标、运行状态和发送队列                                |
+| `/status`                         | 会话/路由、模型/上下文、队列、24h 窗口、桥接版本/重启时间   |
 | `/retry-send`                     | 重试暂停的微信发送，不重新执行模型；可能重复送达            |
 | `/help`                           | 查看帮助                                                    |
 
@@ -96,6 +96,15 @@ npm start
 - 升级时自动保留当前路由、同步游标和收发队列，停用旧的非当前订阅及待发回复。数据库升级至 v3（新增附件及上传结果字段），旧版代码不能直接打开；不要手工编辑数据。
 - 将结果发往微信意味着相应内容离开 Pocket。只连接你愿意同步内容的会话。更完整的对照见 [Hermes 行为与边界](docs/hermes-parity.md)。
 
+## 状态与公网链接
+
+- `/status` 短暂读取 Pocket **已有** `GET /api/poll?c=<当前ID>` 的首帧 view，再 `close=1` 释放；使用桥接已有 owner Bearer token，不读取 Pocket 配置或数据库，不改 Pocket 源码。读取最多 4 秒，关闭最多 2 秒；关闭失败由 Pocket 60 秒到期清理。订阅会短暂出现为查看者，不提交模型任务。
+- 显示当前 ID/标题/PiP、同步水位、当前模型、tokens/窗口/占比、待审批/忙闲、桥接入站/出站积压及 blocked/failed、最后入站、桥接版本与实例启动时间（UTC）。缺失显示 `unknown`。tokens 是 Pocket 最近有效响应的输入+输出+缓存用量；reset/压缩后的估算显示 `Pocket估算`，不是实时精确计数。
+- 最近入站是去重后本人消息的**桥接接收时间**，持久化且重启保留；旧库从已有 received 恢复，没有记录就是 unknown。本次 `/status` 本身也刷新它；24h 的 OPEN/EXPIRED 只是该时间推导的窗口参考，不是微信确认可发送的保证，重复消息不刷新。
+- `/status` 的诊断回执可越过暂停/退避的发送队列；它不重试、不取消、不改序普通回复，也不能绕过微信自身的会话窗口。队列计数是快照，不含本次诊断命令/回执。
+- `POCKET_PUBLIC_URL` 仅用于文本链接，必须是无路径/查询/凭证的 origin；认证 API 仍只访问 `POCKET_URL`。所有出站文本（含普通模型回复、命令、帮助、审批、错误）在分片前统一处理，发出时再次处理已有队列。识别 API origin、同端口 loopback 别名、当前公网 origin、相对 `/s/ID` 与 protocol-relative 链接；不猜测其他域名。未配置时明确提示设置变量，绝不回退到 API 地址。
+- 保留 URL 路径、entry/from/before/path/line/tab/sheet/download 查询定位参数和数字 entry 锚点；其他查询/锚点不转发，登录/邀请链接隐藏，URL 内的登录凭证移除。无关站点保持原文。不从任何链接自动下载或上传文件。
+
 ## 图片与文件
 
 - 入站最多 8 个附件，每个最多 **20 MiB**；微信 CDN 限定 HTTPS allowlist，拒绝重定向，解密采用协议要求的 AES-128-ECB/PKCS#7，错误填充不容错。语音/视频消息一律拒绝，不使用微信语音转写文本。普通文件按附件透传，不做 ASR/TTS 或视频分析。
@@ -109,12 +118,12 @@ npm start
 
 可选环境变量：
 
-| 变量                         | 默认 / 含义                                         |
-| ---------------------------- | --------------------------------------------------- |
-| `WEIXIN_DATA_DIR`            | `~/.local/share/pi-pocket-weixin`；独立私有数据目录 |
-| `POCKET_PUBLIC_URL`          | 同 POCKET_URL，仅用于手机上的会话链接               |
-| `POCKET_NEW_CWD`             | /new 使用的工作目录；不填则由 Pocket 决定           |
-| `WEIXIN_TEXT_BATCH_DELAY_MS` | 300；0 关闭合并，最大 2000 毫秒                     |
+| 变量                         | 默认 / 含义                                              |
+| ---------------------------- | -------------------------------------------------------- |
+| `WEIXIN_DATA_DIR`            | `~/.local/share/pi-pocket-weixin`；独立私有数据目录      |
+| `POCKET_PUBLIC_URL`          | 无默认值；手机可访问的 Pocket origin，未配置明确隐藏链接 |
+| `POCKET_NEW_CWD`             | /new 使用的工作目录；不填则由 Pocket 决定                |
+| `WEIXIN_TEXT_BATCH_DELAY_MS` | 300；0 关闭合并，最大 2000 毫秒                          |
 
 程序从当前工作目录读取 .env。不要把数据目录放在仓库里。目录权限 0700，凭证和 SQLite 主文件权限 0600；首版主要面向 Linux/macOS，未验证 Windows 的权限与文件系统行为。
 

@@ -2,6 +2,15 @@ import { z } from "zod";
 import { type Fetcher, pocketBase, requestJson } from "./http.ts";
 import { oneLine } from "./format.ts";
 import { AttachmentSchema, MediaError, type Attachment } from "./media.ts";
+import { PocketLinks } from "./pocket-links.ts";
+
+export const DiagnosticsSchema = z.object({
+  model: z.object({ provider: z.string(), modelId: z.string() }).nullish(),
+  contextWindow: z.number().int().positive().optional(),
+  contextTokens: z.number().finite().nonnegative().optional(),
+  contextEstimated: z.boolean().optional(),
+});
+export type Diagnostics = z.infer<typeof DiagnosticsSchema>;
 
 export const TargetSchema = z.object({
   id: z.number().int().positive(),
@@ -64,11 +73,13 @@ export interface PocketPort {
   model(id: number, provider: string, modelId: string, thinkingLevel?: string): Promise<void>;
   reset(id: number, note?: string): Promise<void>;
   running(): Promise<Running[]>;
+  diagnostics(id: number): Promise<Diagnostics>;
   link(id: number): string;
 }
 export class Pocket implements PocketPort {
   readonly base: string;
-  readonly publicBase: string;
+  readonly publicBase?: string;
+  readonly links: PocketLinks;
   readonly token: string;
   readonly fetcher: Fetcher;
   readonly signal?: AbortSignal;
@@ -78,7 +89,8 @@ export class Pocket implements PocketPort {
     options: { publicUrl?: string; fetcher?: Fetcher; signal?: AbortSignal } = {},
   ) {
     this.base = pocketBase(base);
-    this.publicBase = pocketBase(options.publicUrl || base);
+    this.links = new PocketLinks(base, options.publicUrl);
+    this.publicBase = this.links.publicOrigin;
     this.token = token;
     this.fetcher = options.fetcher || fetch;
     this.signal = options.signal;
@@ -226,8 +238,60 @@ export class Pocket implements PocketPort {
   async running(): Promise<Running[]> {
     return z.array(RunningSchema).parse(await this.#request("running"));
   }
+  async diagnostics(id: number): Promise<Diagnostics> {
+    let session: string | undefined;
+    const headers = { Authorization: `Bearer ${this.token}`, "X-Pocket": "1" };
+    try {
+      const raw = await requestJson(
+        this.fetcher,
+        `${this.base}/api/poll?c=${id}`,
+        { headers },
+        4000,
+        this.signal,
+      );
+      const envelope = z.object({ session: z.string().uuid() }).parse(raw);
+      session = envelope.session;
+      const result = z
+        .object({ events: z.array(z.object({ event: z.string(), data: z.unknown() })) })
+        .parse(raw);
+      for (const event of result.events) {
+        if (event.event !== "view") continue;
+        const view = z
+          .object({
+            conversation: z.object({ id: z.literal(id) }),
+            agent: z.object({
+              model: DiagnosticsSchema.shape.model,
+              contextWindow: DiagnosticsSchema.shape.contextWindow,
+            }),
+            stats: z.object({
+              contextTokens: DiagnosticsSchema.shape.contextTokens,
+              contextEstimated: DiagnosticsSchema.shape.contextEstimated,
+            }),
+          })
+          .safeParse(event.data);
+        if (view.success)
+          return DiagnosticsSchema.parse({ ...view.data.agent, ...view.data.stats });
+      }
+      return {};
+    } catch {
+      return {};
+    } finally {
+      if (session) {
+        try {
+          await requestJson(
+            this.fetcher,
+            `${this.base}/api/poll?session=${encodeURIComponent(session)}&close=1`,
+            { headers },
+            2000,
+          );
+        } catch {
+          /* Server expires an unreachable poller after 60 seconds. */
+        }
+      }
+    }
+  }
   link(id: number): string {
-    return `${this.publicBase}/s/${id}`;
+    return this.links.session(id);
   }
 }
 

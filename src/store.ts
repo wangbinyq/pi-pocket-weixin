@@ -43,6 +43,7 @@ export type Delivery = z.infer<typeof DeliverySchema>;
 
 export class Store {
   readonly db: DatabaseSync;
+  outboundText: (text: string) => string = (text) => text;
   constructor(dir: string) {
     privateDirectory(dir);
     const file = join(dir, "bridge.sqlite");
@@ -145,8 +146,10 @@ export class Store {
             Date.now(),
             msg.media?.length ? JSON.stringify(msg.media) : null,
           );
-        if (Number(inserted.changes) > 0 && msg.contextToken)
-          this.set("contextToken", msg.contextToken);
+        if (Number(inserted.changes) > 0) {
+          this.set("lastInboundAt", String(Date.now()));
+          if (msg.contextToken) this.set("contextToken", msg.contextToken);
+        }
       }
       if (messages.length)
         this.db
@@ -154,6 +157,14 @@ export class Store {
           .run();
       this.set("syncCursor", cursor);
     });
+  }
+  lastInboundAt(): number | undefined {
+    const stored = Number(this.get("lastInboundAt"));
+    if (Number.isFinite(stored) && stored > 0) return stored;
+    const row = z
+      .object({ at: z.number().nullable() })
+      .parse(this.db.prepare("SELECT MAX(received) AS at FROM inbox").get());
+    return row.at && row.at > 0 ? row.at : undefined;
   }
   target(): Target | undefined {
     const raw = this.get("target");
@@ -282,10 +293,12 @@ export class Store {
     response?: string,
     created?: Target,
     media?: { blob: MediaBlob; conversation: number }[],
+    diagnostic = false,
   ): void {
     this.transaction(() => {
       if (created) this.#select(created, 0);
       if (response) this.enqueue(`command:${key}`, response);
+      if (response && diagnostic) this.set("diagnosticReply", stableId(`command:${key}`, "0"));
       media?.forEach((item, index) =>
         this.enqueueMedia(`command:${key}:media:${index}`, item.blob, item.conversation),
       );
@@ -338,7 +351,7 @@ export class Store {
     this.db.prepare("UPDATE watches SET approval=? WHERE id=?").run(count, id);
   }
   enqueue(key: string, text: string, conversation?: number): void {
-    const chunks = splitText(text);
+    const chunks = splitText(this.outboundText(text));
     chunks.forEach((chunk, index) => {
       this.db
         .prepare("INSERT OR IGNORE INTO outbox(key,text,conversation) VALUES(?,?,?)")
@@ -366,6 +379,13 @@ export class Store {
     return new Set(rows.map((row) => BlobSchema.parse(JSON.parse(row.media)).id));
   }
   delivery(): Delivery | undefined {
+    const diagnostic = this.get("diagnosticReply");
+    if (diagnostic) {
+      const row = this.db
+        .prepare("SELECT * FROM outbox WHERE key=? AND state='pending' AND due<=?")
+        .get(diagnostic, Date.now());
+      if (row) return DeliverySchema.parse(row);
+    }
     const row = this.db
       .prepare(
         "SELECT * FROM outbox WHERE state IN ('pending','blocked','failed') ORDER BY seq LIMIT 1",
@@ -377,6 +397,7 @@ export class Store {
     return !!this.db.prepare("SELECT 1 FROM outbox WHERE key=? AND state='pending'").get(key);
   }
   sent(key: string): void {
+    if (this.get("diagnosticReply") === key) this.set("diagnosticReply", "");
     this.db
       .prepare("UPDATE outbox SET state='sent',text='',media=NULL,wire=NULL WHERE key=?")
       .run(key);

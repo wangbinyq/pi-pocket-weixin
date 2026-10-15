@@ -6,6 +6,7 @@ import QRCode from "qrcode";
 import { Bridge } from "./bridge.ts";
 import { dataDirectory, loadAccount, loadConfig, privateDirectory, saveAccount } from "./config.ts";
 import { stableId } from "./format.ts";
+import { NO_PUBLIC_LINK } from "./pocket-links.ts";
 import { ILink, qrLogin } from "./ilink.ts";
 import { Pocket } from "./pocket.ts";
 import { Store } from "./store.ts";
@@ -38,7 +39,7 @@ async function main(): Promise<void> {
         "\nData directory: " +
         dir +
         "\nPublic links: " +
-        config.publicUrl +
+        (config.publicUrl || NO_PUBLIC_LINK) +
         "\nUse /status in Weixin for pending/blocked deliveries. Do not share this directory.",
     );
     return;

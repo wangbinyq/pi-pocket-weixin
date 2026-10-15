@@ -98,6 +98,7 @@ test("SEC-2: a changed Pocket principal stops input and collection instead of ac
 const POCKET_ENDPOINTS = [
   "GET /api/c/{id}/history",
   "GET /api/me",
+  "GET /api/poll",
   "GET /api/running",
   "GET /api/sessions",
   "POST /api/c/{id}/abort",
@@ -112,6 +113,7 @@ const POCKET_METHODS = [
   "after",
   "create",
   "cwd",
+  "diagnostics",
   "head",
   "link",
   "model",
@@ -144,6 +146,11 @@ test("SEC-3: the bridge reaches only the reviewed Pocket endpoints", async () =>
       if (path === "/api/sessions") return Response.json({ id: 8 });
       if (path === "/api/pip") return Response.json({ pip: { id: 7 } });
       if (path === "/api/running") return Response.json([]);
+      if (path === "/api/poll")
+        return Response.json({
+          session: "bdb9c089-9447-4e7b-a4fc-1e73eab6db6f",
+          events: [{ event: "view", data: { conversation: { id: 7 }, agent: {}, stats: {} } }],
+        });
       if (path === "/api/c/{id}/history")
         return Response.json(history++ === 0 ? [{ id: 3, kind: "assistant", blocks: [] }] : []);
       if (path === "/api/c/{id}/submit") return Response.json({ submissionId: 1, requestId: "r" });
@@ -169,6 +176,7 @@ test("SEC-3: the bridge reaches only the reviewed Pocket endpoints", async () =>
   await pocket.model(7, "p", "m");
   await pocket.reset(7);
   await pocket.running();
+  await pocket.diagnostics(7);
   await pocket.upload(7, Buffer.from("test"), "test.txt", "text/plain");
   assert.equal(await pocket.cwd({ id: 7, title: "test", pip: false }), "/tmp");
   assert.deepEqual([...calls].sort(), POCKET_ENDPOINTS);

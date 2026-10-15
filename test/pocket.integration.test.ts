@@ -78,6 +78,9 @@ test(
     await bridge.initialize();
     const pipId = f.store.target()!.id;
     assert.notEqual(pipId, first.id);
+    const pipDiagnostic = await pocket.diagnostics(pipId);
+    assert.ok(pipDiagnostic.model);
+    assert.ok(pipDiagnostic.contextWindow! > 0);
     f.input(`/resume ${first.id}`);
     assert.equal(await bridge.processNext(), true);
     assert.equal(f.store.target()?.id, first.id);
@@ -95,6 +98,12 @@ test(
     };
     const entries = await waitForReply(first.id, baseline);
     assert.equal(entries.filter((entry) => entry.kind === "user").length, 1);
+    const diagnostic = await pocket.diagnostics(first.id);
+    assert.ok(diagnostic.model);
+    assert.ok(diagnostic.contextTokens! > 0);
+    assert.ok(diagnostic.contextWindow! > 0);
+    f.input("/status");
+    await bridge.processNext();
     await bridge.collect();
     while (await bridge.deliverNext()) {
       /* drain into the fake Weixin transport */
