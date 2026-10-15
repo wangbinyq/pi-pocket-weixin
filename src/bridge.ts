@@ -11,6 +11,7 @@ const HELP = `Pi Pocket 微信桥接
 /sessions — 列出最近 30 个会话，显示固定 ID
 /resume <ID> — 恢复指定会话
 /new [标题] — 新建并连接会话
+/reset [交接说明] — 当前会话开启新上下文，保留历史
 /status — 当前目标和待发送消息
 /retry-send — 重试暂停的微信发送（不重新运行模型）
 /help — 帮助
@@ -77,7 +78,12 @@ export class Bridge {
     if (!job || job.due > Date.now()) return false;
     try {
       await this.#authorize();
-      if (job.creating) {
+      if (this.store.get("resetIntent") === job.key) {
+        this.store.finish(
+          job.key,
+          "上次 /reset 的结果不确定，未自动重试，避免再次清除新上下文。请打开 Pocket 检查当前会话的新上下文标记后，再决定是否重新发送 /reset。",
+        );
+      } else if (job.creating) {
         this.store.finish(
           job.key,
           "上次 /new 的结果不确定，已停止自动重试，避免重复建会话。请 /sessions 检查，再 /resume <ID>。",
@@ -175,6 +181,29 @@ export class Bridge {
         }
         this.store.finish(job.key, this.#connected(target), target);
         return;
+      }
+      case "/reset": {
+        const target = this.store.target();
+        if (!target) throw new CommandError("没有目标会话，请先 /pip 或 /resume <ID>。");
+        const note = job.text.trim().slice(command.length).trim();
+        if (note.length > 20_000)
+          throw new CommandError("/reset 的交接说明不能超过 20000 字符，本次未执行。");
+        this.store.beginReset(job.key, target);
+        try {
+          await this.pocket.reset(target.id, note || undefined);
+        } catch (error) {
+          if (error instanceof HttpError && [400, 403, 404, 409, 413].includes(error.status))
+            throw new CommandError(
+              `Pocket 未接受 /reset（HTTP ${error.status}）。请在网页检查权限、轮流控制和交接说明后重新发送。`,
+            );
+          this.store.finish(
+            job.key,
+            "本次 /reset 的结果不确定，未自动重试，避免再次清除新上下文。请打开 Pocket 检查当前会话的新上下文标记后，再决定是否重新发送 /reset。",
+          );
+          return;
+        }
+        response = `${this.#label(target)} 新上下文请求已接受。\n历史记录保留，会话 ID 不变；${note ? "已附带交接说明。" : "未附带交接说明。"}忙时在下一处理边界生效，不停止当前任务。\n${this.pocket.link(target.id)}`;
+        break;
       }
       case "/status": {
         const target = this.store.target();

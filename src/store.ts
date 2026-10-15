@@ -223,6 +223,12 @@ export class Store {
       .prepare("UPDATE inbox SET target=? WHERE key=? AND target IS NULL")
       .run(JSON.stringify(target), key);
   }
+  beginReset(key: string, target: Target): void {
+    this.transaction(() => {
+      this.pinJob(key, target);
+      this.set("resetIntent", key);
+    });
+  }
   markCreating(key: string): void {
     this.db.prepare("UPDATE inbox SET creating=1 WHERE key=?").run(key);
   }
@@ -231,6 +237,7 @@ export class Store {
       if (created) this.#select(created, 0);
       if (response) this.enqueue(`command:${key}`, response);
       this.db.prepare("UPDATE inbox SET done=1,text='' WHERE key=?").run(key);
+      if (this.get("resetIntent") === key) this.set("resetIntent", "");
     });
   }
   retryJob(job: Job): void {

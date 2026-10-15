@@ -22,6 +22,7 @@ export class FakePocket implements PocketPort {
     [2, []],
   ]);
   requests = new Map<string, { id: number; text: string }>();
+  resets: { id: number; note?: string }[] = [];
   calls: string[] = [];
   active: Running[] = [];
   failSubmit = false;
@@ -58,6 +59,9 @@ export class FakePocket implements PocketPort {
     this.calls.push(requestId);
     this.requests.set(requestId, { id, text });
     if (this.failSubmit) throw new Error("Response lost after server commit");
+  }
+  async reset(id: number, note?: string): Promise<void> {
+    this.resets.push({ id, ...(note === undefined ? {} : { note }) });
   }
   async running(): Promise<Running[]> {
     return this.active;

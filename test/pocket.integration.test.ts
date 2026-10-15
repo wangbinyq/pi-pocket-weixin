@@ -12,7 +12,7 @@ import { account, fixture } from "./helpers.ts";
 const source = process.env.POCKET_SOURCE;
 
 test(
-  "real Pocket API: PiP, switching, idempotent input, final replies and /new",
+  "real Pocket API: PiP, switching, idempotent input, final replies, /reset and /new",
   { skip: !source, timeout: 90_000 },
   async (t) => {
     const reservation = createServer();
@@ -102,6 +102,25 @@ test(
     assert.ok(
       f.weixin.sent.some((entry) => /echo:[\s\S]*integration idempotent task/.test(entry.text)),
     );
+    const resetBaseline = await pocket.head(first.id);
+    const sessionCount = (await pocket.sessions()).length;
+    f.input("/reset 保留目标，但不保留旧对话");
+    await bridge.processNext();
+    assert.equal(f.store.target()?.id, first.id);
+    assert.equal((await pocket.sessions()).length, sessionCount);
+    assert.ok(
+      (await pocket.after(first.id, resetBaseline)).some((entry) => entry.kind === "reset"),
+    );
+    assert.ok((await pocket.after(first.id, 0)).some((entry) => entry.id === entries[0]!.id));
+    const afterReset = await pocket.head(first.id);
+    f.input("task in the new context");
+    await bridge.processNext();
+    await waitForReply(first.id, afterReset);
+    await bridge.collect();
+    while (await bridge.deliverNext()) {}
+    assert.ok(
+      f.weixin.sent.some((entry) => /echo:[\s\S]*task in the new context/.test(entry.text)),
+    );
     f.input("/pip");
     await bridge.processNext();
     assert.equal(f.store.target()?.id, pipId);
@@ -113,6 +132,13 @@ test(
       /* drain */
     }
     assert.ok(f.weixin.sent.some((entry) => /echo:[\s\S]*hello from Weixin/.test(entry.text)));
+    const pipResetBaseline = await pocket.head(pipId);
+    f.input("/reset");
+    await bridge.processNext();
+    assert.equal(f.store.target()?.id, pipId);
+    assert.ok(
+      (await pocket.after(pipId, pipResetBaseline)).some((entry) => entry.kind === "reset"),
+    );
     const inactiveHead = await pocket.head(first.id);
     await pocket.submit(
       first.id,

@@ -40,6 +40,7 @@ export interface PocketPort {
   after(id: number, cursor: number): Promise<Entry[]>;
   create(title: string, cwd?: string): Promise<Target>;
   submit(id: number, text: string, requestId: string): Promise<void>;
+  reset(id: number, note?: string): Promise<void>;
   running(): Promise<Running[]>;
   link(id: number): string;
 }
@@ -130,6 +131,11 @@ export class Pocket implements PocketPort {
   async submit(id: number, text: string, requestId: string): Promise<void> {
     z.object({ submissionId: z.number(), requestId: z.string() }).parse(
       await this.#request(`c/${id}/submit`, { text, requestId, mode: "followUp" }),
+    );
+  }
+  async reset(id: number, note?: string): Promise<void> {
+    z.object({ ok: z.literal(true) }).parse(
+      await this.#request(`c/${id}/reset`, note ? { note } : {}),
     );
   }
   async running(): Promise<Running[]> {
