@@ -100,7 +100,7 @@ test("/status shows current route, model/context, all queue states, window and b
     .prepare("SELECT text FROM outbox WHERE text LIKE '%上下文%'")
     .get()?.text;
   assert.equal(typeof output, "string");
-  assert.match(String(output), /#1 Pi in Pocket/);
+  assert.match(String(output), /\[#1\]\(https:\/\/pocket\.example\.com\/s\/1\) Pi in Pocket/);
   assert.match(String(output), /路由 同步中 · 游标 0/);
   assert.match(String(output), /模型 test\/model/);
   assert.match(String(output), /上下文 12345\/100000 tokens/);

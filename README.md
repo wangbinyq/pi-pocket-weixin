@@ -53,7 +53,7 @@ POCKET_TOKEN=你自己的Pocket-owner-token
 
 HTTP 只允许 loopback（localhost、127.0.0.1、127.0.0.2、::1）；远程 Pocket 必须使用 HTTPS。拒绝重定向，防止凭证发送到其他地址。
 
-**返回链接的域名独立配置：** 设置 `POCKET_PUBLIC_URL=https://your-pocket.example.com`，所有命令和审批通知中的会话链接都会使用它；不设置则使用 `POCKET_URL`。它只改变给人的链接，不改变桥接连接 Pocket API 的地址，也不向该公网域名发送 owner token。仅接受 origin，不要附带登录 token、路径或查询参数。`doctor` 会显示当前返回链接地址。systemd 部署请修改服务使用的 `EnvironmentFile`，再重启桥接（无需重启 Pocket）。
+**返回链接的域名独立配置：** 设置 `POCKET_PUBLIC_URL=https://your-pocket.example.com`，所有命令和审批通知中的会话链接都会使用它；不设置则不给出链接，而是提示设置该变量（绝不回退到 `POCKET_URL`）。链接挂在会话 ID（`#ID`）上，不单独发裸 URL。它只改变给人的链接，不改变桥接连接 Pocket API 的地址，也不向该公网域名发送 owner token。仅接受 origin，不要附带登录 token、路径或查询参数。`doctor` 会显示当前返回链接地址。systemd 部署请修改服务使用的 `EnvironmentFile`，再重启桥接（无需重启 Pocket）。
 
 ```sh
 npm run login    # 用本人微信扫码并确认；二维码也不要分享
@@ -70,7 +70,7 @@ npm start
 | 命令                              | 行为                                                        |
 | --------------------------------- | ----------------------------------------------------------- |
 | `/pip`                            | 回到现有 PiP 管家                                           |
-| `/sessions`                       | 列出最近 30 个会话，显示 Pocket 固定 ID                     |
+| `/sessions`                       | 列出最近 30 个会话，Pocket 固定 ID 本身就是网页链接         |
 | `/resume 12`                      | 恢复会话 #12，不是列表第 12 项                              |
 | `/new 标题`                       | 新建会话并连接，目录和模型使用 Pocket 默认值                |
 | `/reset [说明]`                   | 当前会话开启新上下文，保留历史；可附带交接说明              |

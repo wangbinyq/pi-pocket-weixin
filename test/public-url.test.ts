@@ -34,16 +34,26 @@ test("commands and approval notifications all use the configured public link ori
     f.input(command);
     await f.bridge.processNext();
     while (await f.bridge.deliverNext()) {}
-    assert.match(f.weixin.sent.at(-1)!.text, /https:\/\/public-pocket\.example\.com\/s\/\d+/);
+    assert.match(
+      f.weixin.sent.at(-1)!.text,
+      /\[#\d+\]\(https:\/\/public-pocket\.example\.com\/s\/\d+\)/,
+    );
   }
   f.pocket.active = [{ id: f.store.target()!.id, title: "project", busy: true, approvals: 1 }];
   await f.bridge.collect();
   while (await f.bridge.deliverNext()) {}
-  assert.match(f.weixin.sent.at(-1)!.text, /https:\/\/public-pocket\.example\.com\/s\/\d+/);
+  assert.match(
+    f.weixin.sent.at(-1)!.text,
+    /\[#\d+\]\(https:\/\/public-pocket\.example\.com\/s\/\d+\)/,
+  );
   assert.ok(
     f.weixin.sent.every(
       (message) => !message.text.includes("127.0.0.1") && !message.text.includes("test-token"),
     ),
+  );
+  assert.ok(
+    f.weixin.sent.every((message) => !/\)\s*\nhttps?:\/\//.test(message.text)),
+    "the public link must sit on the session ID, not on its own line",
   );
 });
 

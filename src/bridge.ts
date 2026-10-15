@@ -24,7 +24,7 @@ import { MediaItemSchema } from "./weixin-media.ts";
 
 const HELP = `Pi Pocket 微信桥接
 /pip — 连接 PiP 管家
-/sessions — 列出最近 30 个会话，显示固定 ID
+/sessions — 列出最近 30 个会话，固定 ID 即网页链接
 /resume <ID> — 恢复指定会话
 /new [标题] — 新建并连接会话
 /reset [交接说明] — 当前会话开启新上下文，保留历史
@@ -87,7 +87,14 @@ export class Bridge {
       throw new Error("Pocket identity changed; bridge paused");
   }
   #label(target: { id: number; title: string }): string {
-    return `【#${target.id} ${oneLine(target.title)}】`;
+    const id = this.links.publicOrigin
+      ? `[#${target.id}](${this.pocket.link(target.id)})`
+      : `#${target.id}`;
+    return `【${id} ${oneLine(target.title)}】`;
+  }
+  // With no public origin the ID cannot carry a link, so the disabled-link notice stays.
+  #notice(target: { id: number }): string {
+    return this.links.publicOrigin ? "" : "\n" + this.pocket.link(target.id);
   }
   async #select(target: Target): Promise<void> {
     await this.#typing(false);
@@ -227,13 +234,14 @@ export class Bridge {
         break;
       case "/sessions": {
         const sessions = await this.pocket.sessions();
+        const withLinks = this.links.publicOrigin !== undefined;
         response =
           "固定会话 ID（不是列表序号）：\n" +
           sessions
             .slice(0, 30)
             .map(
               (session) =>
-                `#${session.id} ${oneLine(session.title || "New session")} · ${session.waiting ? "待审批" : session.busy ? "工作中" : "空闲"}${session.archived ? " · 已归档" : ""}`,
+                `${withLinks ? `[#${session.id}](${this.pocket.link(session.id)})` : `#${session.id}`} ${oneLine(session.title || "New session")} · ${session.waiting ? "待审批" : session.busy ? "工作中" : "空闲"}${session.archived ? " · 已归档" : ""}`,
             )
             .join("\n") +
           "\n\n/resume <ID> 恢复会话；/pip 返回管家。";
@@ -289,7 +297,7 @@ export class Bridge {
           );
           return;
         }
-        response = `${this.#label(target)} 新上下文请求已接受。\n历史记录保留，会话 ID 不变；${note ? "已附带交接说明。" : "未附带交接说明。"}忙时在下一处理边界生效，不停止当前任务。\n${this.pocket.link(target.id)}`;
+        response = `${this.#label(target)} 新上下文请求已接受。\n历史记录保留，会话 ID 不变；${note ? "已附带交接说明。" : "未附带交接说明。"}忙时在下一处理边界生效，不停止当前任务。${this.#notice(target)}`;
         break;
       }
       case "/stop": {
@@ -299,7 +307,7 @@ export class Bridge {
         this.store.beginStop(job.key, target);
         await this.pocket.stop(target.id);
         await this.#typing(false);
-        response = `${this.#label(target)} 当前运行已停止，之前排队的输入已撤回。独立后台任务和定时计划不会全部取消。\n${this.pocket.link(target.id)}`;
+        response = `${this.#label(target)} 当前运行已停止，之前排队的输入已撤回。独立后台任务和定时计划不会全部取消。${this.#notice(target)}`;
         break;
       }
       case "/busy": {
@@ -335,7 +343,7 @@ export class Bridge {
           this.store.set("modelIntent", job.key);
         });
         await this.pocket.model(target.id, model.provider, model.id, level);
-        response = `${this.#label(target)} 已选择 ${oneLine(spec!)}${level ? " · " + level : ""}；不会中断正在执行的工具。\n${this.pocket.link(target.id)}`;
+        response = `${this.#label(target)} 已选择 ${oneLine(spec!)}${level ? " · " + level : ""}；不会中断正在执行的工具。${this.#notice(target)}`;
         break;
       }
       case "/send": {
@@ -405,8 +413,9 @@ export class Bridge {
             lastInboundAt: this.store.lastInboundAt(),
             version: bridgeVersion,
             startedAt: this.startedAt,
+            link: target && this.links.publicOrigin ? this.pocket.link(target.id) : undefined,
             now: Date.now(),
-          }) + (target ? "\n" + this.pocket.link(target.id) : "");
+          }) + (target ? this.#notice(target) : "");
         this.store.finish(job.key, response, undefined, undefined, true);
         return;
       }
@@ -422,7 +431,7 @@ export class Bridge {
     this.store.finish(job.key, response);
   }
   #connected(target: Target): string {
-    return `${this.#label(target)} 已连接。\n后续文字发送到此会话，仅同步当前会话的新最终回复。切换不停止旧任务，不补发离开期间的回复。\n${this.pocket.link(target.id)}`;
+    return `${this.#label(target)} 已连接。\n后续文字发送到此会话，仅同步当前会话的新最终回复。切换不停止旧任务，不补发离开期间的回复。${this.#notice(target)}`;
   }
   async collect(): Promise<void> {
     await this.#authorize();
@@ -462,7 +471,7 @@ export class Bridge {
         if (approvals && !current.approval) {
           this.store.enqueue(
             `approval:${watch.id}:${Date.now()}`,
-            `${this.#label(watch)} 需要人工审批。请在 Pocket 查看并决定：\n${this.pocket.link(watch.id)}`,
+            `${this.#label(watch)} 需要人工审批。请在 Pocket 查看并决定：${this.#notice(watch)}`,
             watch.id,
           );
         }

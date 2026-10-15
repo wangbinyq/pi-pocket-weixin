@@ -169,7 +169,10 @@ test("successful new-session creation atomically selects and acknowledges", asyn
   await f.bridge.processNext();
   assert.equal(f.store.target()?.id, 101);
   assert.equal(f.store.job(), undefined);
-  assert.match(f.store.delivery()?.text || "", /#101 project/);
+  assert.match(
+    f.store.delivery()?.text || "",
+    /\[#101\]\(https:\/\/pocket\.example\.com\/s\/101\) project/,
+  );
 });
 
 test("resume cancels pending old replies, returning does not replay missed history", async (t) => {
@@ -250,4 +253,46 @@ test("access is rechecked before sending a persisted reply", async (t) => {
   assert.equal(await f.bridge.deliverNext(), false);
   assert.equal(f.weixin.sent.length, 0);
   assert.equal(f.store.delivery(), undefined);
+});
+
+test("/sessions lists every fixed ID with its public link", async (t) => {
+  const f = fixture(t);
+  f.pocket.sessions = async () => [
+    { id: 7, title: "gallery2", cwd: "/tmp", busy: true, waiting: false },
+    { id: 8, title: "old", cwd: "/tmp", busy: false, waiting: false, archived: true },
+  ];
+  await f.bridge.initialize();
+  f.input("/sessions");
+  await f.bridge.processNext();
+  while (await f.bridge.deliverNext()) {
+    /* drain */
+  }
+  const text = f.weixin.sent.map((item) => item.text).join("\n");
+  assert.match(text, /\[#7\]\(https:\/\/pocket\.example\.com\/s\/7\) gallery2 · 工作中/);
+  assert.match(text, /\[#8\]\(https:\/\/pocket\.example\.com\/s\/8\) old · 空闲 · 已归档/);
+});
+
+test("/sessions stays readable without a configured public link", async (t) => {
+  const f = fixture(t);
+  const bridge = new Bridge(
+    f.store,
+    f.pocket,
+    f.weixin,
+    account,
+    { ...f.config, publicUrl: undefined },
+    () => {},
+  );
+  f.pocket.sessions = async () => [
+    { id: 7, title: "gallery2", cwd: "/tmp", busy: false, waiting: false },
+  ];
+  await bridge.initialize();
+  f.input("/sessions");
+  await bridge.processNext();
+  while (await bridge.deliverNext()) {
+    /* drain */
+  }
+  const text = f.weixin.sent.map((item) => item.text).join("\n");
+  assert.match(text, /#7 gallery2 · 空闲/);
+  assert.doesNotMatch(text, /POCKET_PUBLIC_URL/);
+  assert.doesNotMatch(text, /https?:\/\//);
 });

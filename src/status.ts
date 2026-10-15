@@ -10,6 +10,7 @@ export function statusText(info: {
   runningKnown: boolean;
   counts: { inbox: number; pending: number; blocked: number; failed: number };
   lastInboundAt?: number;
+  link?: string;
   version: string;
   startedAt: number;
   now: number;
@@ -41,7 +42,7 @@ export function statusText(info: {
         : "空闲";
   return [
     target
-      ? `【#${target.id} ${oneLine(target.title)}】${target.pip ? " PiP" : ""}`
+      ? `【${info.link ? `[#${target.id}](${info.link})` : `#${target.id}`} ${oneLine(target.title)}】${target.pip ? " PiP" : ""}`
       : "会话 unknown",
     `路由 ${watch ? "同步中" : "未同步"} · 游标 ${watch?.cursor ?? "unknown"}`,
     `模型 ${data.model ? oneLine(data.model.provider + "/" + data.model.modelId) : "unknown"}`,
