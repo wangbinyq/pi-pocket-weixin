@@ -17,8 +17,11 @@ export class PocketLinks {
     return text.replace(
       /https?:\/\/[^\s<>"'`，。！？；、）】]+|(?<![:\w/])\/\/[^\s<>"'`，。！？；、）】]+|(?<![\w/:?=&#])\/s\/\d+(?:\?[^\s<>"'`，。！？；、）】)\]]*)?(?:#[^\s<>"'`，。！？；、）】)\]]*)?/giu,
       (raw) => {
-        let candidate = raw;
-        let suffix = "";
+        // A URL never carries non-ASCII text, so prose glued to its right is cut off
+        // first: new URL() would otherwise percent-encode it.
+        let candidate = /^[ -~]*/.exec(raw)![0];
+        if (!candidate) return raw;
+        let suffix = raw.slice(candidate.length);
         const opening: Record<string, string> = { ")": "(", "]": "[", "}": "{" };
         while (candidate) {
           const last = candidate.at(-1)!;

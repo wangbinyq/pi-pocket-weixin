@@ -22,6 +22,45 @@ test("Pocket URLs in prose, Markdown, relative routes and loopback aliases becom
   assert.equal(links.rewrite(text), text);
 });
 
+test("prose glued to a Pocket link survives the rewrite and a second rewrite changes nothing", () => {
+  const links = new PocketLinks(api, publicUrl);
+  const raw = `[根因换了](${api}/s/73186):**代码没拆,是微信/iLink 把「图+文」投成了两条独立消息**(日志两次 intake 相隔 1 秒。`;
+  const once = links.rewrite(raw);
+  assert.equal(
+    once,
+    `[根因换了](https://public-pocket.example.com/s/73186):**代码没拆,是微信/iLink 把「图+文」投成了两条独立消息**(日志两次 intake 相隔 1 秒。`,
+  );
+  assert.ok(!once.includes("%"), once);
+  assert.equal(links.rewrite(once), once);
+  assert.equal(
+    links.rewrite(`看 ${api}/s/1中文继续`),
+    "看 https://public-pocket.example.com/s/1中文继续",
+  );
+  assert.equal(links.rewrite(`${publicUrl}/s/1中文`), `${publicUrl}/s/1中文`);
+});
+
+test("an ordinary reply is not corrupted by the enqueue and delivery rewrites", async (t) => {
+  const f = fixture(t);
+  const bridge = new Bridge(
+    f.store,
+    f.pocket,
+    f.weixin,
+    account,
+    { ...f.config, pocketUrl: api, publicUrl },
+    () => {},
+  );
+  await bridge.initialize();
+  const raw = `[根因换了](${api}/s/73186):**代码没拆,是微信/iLink 把「图+文」投成了两条独立消息**。`;
+  f.reply(1, 1, raw);
+  await bridge.collect();
+  while (await bridge.deliverNext()) {}
+  const text = f.weixin.sent.map((row) => row.text).join("\n");
+  assert.equal(
+    text,
+    `[根因换了](https://public-pocket.example.com/s/73186):**代码没拆,是微信/iLink 把「图+文」投成了两条独立消息**。`,
+  );
+});
+
 test("unrelated origins, similar hosts and ports are not rewritten", () => {
   const text =
     "https://example.com/s/1 http://127.0.0.1:9999/s/2 https://public-pocket.example.com.evil.com/s/3 https://pocket.other.com/a?q=/s/4";
