@@ -37,6 +37,8 @@ async function main(): Promise<void> {
         process.version +
         "\nData directory: " +
         dir +
+        "\nPublic links: " +
+        config.publicUrl +
         "\nUse /status in Weixin for pending/blocked deliveries. Do not share this directory.",
     );
     return;
