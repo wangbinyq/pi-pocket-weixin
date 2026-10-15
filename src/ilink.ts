@@ -215,11 +215,18 @@ export interface WeixinPort {
 export class ILink implements WeixinPort {
   readonly account: Account;
   readonly fetcher: Fetcher;
+  readonly log: (message: string) => void;
   #pollTimeout = 35_000;
   #typingTicket?: { value: string; expires: number };
-  constructor(account: Account, fetcher: Fetcher = fetch) {
+  #ticketFetch?: Promise<string | undefined>;
+  constructor(
+    account: Account,
+    fetcher: Fetcher = fetch,
+    log: (message: string) => void = console.log,
+  ) {
     this.account = { ...account, baseUrl: ilinkBase(account.baseUrl) };
     this.fetcher = fetcher;
+    this.log = log;
   }
   async #post(
     endpoint: string,
@@ -248,24 +255,39 @@ export class ILink implements WeixinPort {
     checkEnvelope(value);
     return value;
   }
+  // One getconfig at a time: concurrent typing and intake prefetch share the request, and a
+  // failure is not cached, so the next attempt retries instead of going quiet forever.
+  #typingTicketFor(peer: string, contextToken?: string): Promise<string | undefined> {
+    const cached = this.#typingTicket;
+    if (cached && cached.expires > Date.now()) return Promise.resolve(cached.value);
+    this.#ticketFetch ??= this.#post(
+      "getconfig",
+      { ilink_user_id: peer, ...(contextToken ? { context_token: contextToken } : {}) },
+      10_000,
+    )
+      .then((value) => {
+        const ticket = z
+          .object({ typing_ticket: z.string().optional() })
+          .parse(value).typing_ticket;
+        if (ticket) this.#typingTicket = { value: ticket, expires: Date.now() + 600_000 };
+        return ticket;
+      })
+      .finally(() => {
+        this.#ticketFetch = undefined;
+      });
+    return this.#ticketFetch;
+  }
   async typing(peer: string, active: boolean, contextToken?: string): Promise<void> {
-    if (!this.#typingTicket || this.#typingTicket.expires <= Date.now()) {
-      const config = z.object({ typing_ticket: z.string().optional() }).parse(
-        await this.#post(
-          "getconfig",
-          {
-            ilink_user_id: peer,
-            ...(contextToken ? { context_token: contextToken } : {}),
-          },
-          10_000,
-        ),
+    const ticket = await this.#typingTicketFor(peer, contextToken);
+    if (!ticket) {
+      this.log(
+        "Weixin typing ticket unavailable; the typing indicator was not sent. No credentials are logged.",
       );
-      if (!config.typing_ticket) return;
-      this.#typingTicket = { value: config.typing_ticket, expires: Date.now() + 600_000 };
+      return;
     }
     await this.#post(
       "sendtyping",
-      { ilink_user_id: peer, typing_ticket: this.#typingTicket.value, status: active ? 1 : 2 },
+      { ilink_user_id: peer, typing_ticket: ticket, status: active ? 1 : 2 },
       10_000,
     );
   }
@@ -390,7 +412,11 @@ export class ILink implements WeixinPort {
         .parse(value);
       if (parsed.longpolling_timeout_ms)
         this.#pollTimeout = Math.max(1000, Math.min(parsed.longpolling_timeout_ms, 60_000));
-      return { cursor: parsed.get_updates_buf ?? cursor, messages: parsed.msgs ?? [] };
+      const messages = parsed.msgs ?? [];
+      // Warm the ticket while the message is still being batched, so the first typing does not
+      // wait for getconfig; a failure stays silent here and is reported by typing().
+      if (messages.length) void this.#typingTicketFor(this.account.peer).catch(() => undefined);
+      return { cursor: parsed.get_updates_buf ?? cursor, messages };
     } catch (error) {
       if (error instanceof Error && error.name === "TimeoutError" && !signal?.aborted)
         return { cursor, messages: [] };
